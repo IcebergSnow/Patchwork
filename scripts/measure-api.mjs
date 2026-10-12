@@ -68,7 +68,7 @@ try {
   const active = await measure(check);
   assert.deepEqual(
     { baseline, initial, idle, active, shared },
-    { baseline: 50, initial: 50, idle: 3, active: 4, shared: 0 },
+    { baseline: 51, initial: 51, idle: 3, active: 4, shared: 0 },
   );
   console.log(
     JSON.stringify(

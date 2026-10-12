@@ -16,6 +16,7 @@ import { run, GitHub } from "../packages/cli/lib/github.js";
 import { readJSON } from "../packages/cli/lib/store.js";
 import { stateFile } from "../packages/cli/lib/runtime.js";
 import { accountFile } from "../packages/cli/lib/sync.js";
+import { metadata, marked, visible } from "../packages/cli/lib/board.js";
 if (process.env.PATCHWORK_LIVE_REPO !== "IcebergSnow/PatchworkTesting")
   throw new Error(
     "Set PATCHWORK_LIVE_REPO=IcebergSnow/PatchworkTesting to authorize sandbox writes.",
@@ -89,6 +90,25 @@ async function startup(file, session) {
     assert.fail(
       chat?.lastError || "Startup hook did not deliver this chat's identity.",
     );
+  }
+}
+async function roster() {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await status({ repo });
+    } catch (error) {
+      const delay = Math.max(2000, (error.retryAt || 0) - Date.now());
+      if (
+        attempt ||
+        !(error.status === 0 || error.status >= 500) ||
+        delay > 60_000
+      )
+        throw error;
+      console.log(
+        "Retrying the read-only roster check after a transient GitHub failure.",
+      );
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
   }
 }
 try {
@@ -188,6 +208,43 @@ try {
       "Cross-chat acknowledgments",
     ),
   );
+  // An author edit that changes ONLY the marker must reach the other chat.
+  const acknowledgment = (await gh.list(`/issues/${request.number}/comments`))
+    .filter(
+      (c) =>
+        metadata(c.body)?.agent_id === a.chat.id &&
+        metadata(c.body)?.type === "ack",
+    )
+    .at(-1);
+  await gh.api("PATCH", `/issues/comments/${acknowledgment.id}`, {
+    body: marked(visible(acknowledgment.body), {
+      ...metadata(acknowledgment.body),
+      response: "need_clarification",
+    }),
+  });
+  // GitHub list endpoints can briefly lag a successful edit. Exercise normal
+  // overlapping checkpoints until the edit becomes visible, with a bounded wait.
+  for (let attempt = 0; attempt < 6; attempt++) {
+    await roster();
+    state = await call(b.client, "read_messages", {
+      chat_key: b.chat.chat_key,
+      open_only: true,
+    });
+    if (
+      state.requests
+        .find((r) => r.number === request.number)
+        .acknowledgments.find((ack) => ack.agent_id === a.chat.id).response ===
+      "need_clarification"
+    )
+      break;
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+  }
+  assert.equal(
+    state.requests
+      .find((r) => r.number === request.number)
+      .acknowledgments.find((ack) => ack.agent_id === a.chat.id).response,
+    "need_clarification",
+  );
   await call(a.client, "resolve_request", {
     chat_key: a.chat.chat_key,
     request_id: request.number,
@@ -216,8 +273,14 @@ try {
   });
   assert(denied.isError);
   assert.equal((await status({ cwd: roots[0] }))[0].chats[0].enabled, false);
+  await disconnect({ repo, agent: b.chat.id, log: () => {} });
+  assert.equal(
+    (await roster()).agents.find((agent) => agent.agent_id === b.chat.id)
+      .active,
+    false,
+  );
   console.log(
-    "Real GitHub + separate stdio MCP clients + native startup command passed: identity, replies, acknowledgments, escalation, delivery, close/reopen, disconnect.",
+    "Real GitHub + separate stdio MCP clients + native startup command passed: identity, replies, acknowledgments, metadata-only edits/editor verification, escalation, delivery, close/reopen, local/remote disconnect. This does not test the Codex or Claude app UI.",
   );
 } finally {
   if (request)

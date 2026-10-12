@@ -30,6 +30,7 @@ export class FakeGitHub extends GitHub {
     this.fail = null;
     this.calls = 0;
     this.blockedUsers = new Set();
+    this.managers = new Set();
   }
   time() {
     return new Date(1700000000000 + ++this.counter * 1000).toISOString();
@@ -39,6 +40,23 @@ export class FakeGitHub extends GitHub {
     return this.credential;
   }
   async pin() {}
+  async commentEditors(ids) {
+    return this.response("GET", "/graphql", () =>
+      ids.map((id) => {
+        const c = this.comments.find((c) => c.node_id === id);
+        return c
+          ? {
+              id,
+              body: c.body,
+              updatedAt: c.updated_at,
+              author: { id: `user:${c.user.id}` },
+              editor: { id: `user:${c.editor?.id || c.user.id}` },
+              issue: { repository: { nameWithOwner: this.repo } },
+            }
+          : null;
+      }),
+    );
+  }
   async request(method, endpoint, data) {
     if (endpoint === "/user")
       return this.response(method, endpoint, () => ({ ...this.user }));
@@ -91,7 +109,13 @@ export class FakeGitHub extends GitHub {
         permissions: { push: !this.noWrite },
       };
     if ((m = suffix.match(/^\/collaborators\/([^/]+)\/permission$/)))
-      return { permission: this.blockedUsers.has(m[1]) ? "read" : "write" };
+      return {
+        permission: this.blockedUsers.has(m[1])
+          ? "read"
+          : this.managers.has(m[1])
+            ? "maintain"
+            : "write",
+      };
     if (suffix === "/labels" && method === "POST") {
       this.labels.push(data);
       return data;
@@ -138,6 +162,7 @@ export class FakeGitHub extends GitHub {
         id = ++this.counter;
       const c = {
         id,
+        node_id: `comment:${id}`,
         thread: +m[1],
         body: data.body,
         user: { ...this.user },
@@ -157,7 +182,10 @@ export class FakeGitHub extends GitHub {
       const c = this.comments.find((c) => c.id === +m[1]);
       if (!c) throw new GitHubError(404);
       if (method === "PATCH")
-        Object.assign(c, data, { updated_at: this.time() });
+        Object.assign(c, data, {
+          updated_at: this.time(),
+          editor: { ...this.user },
+        });
       if (method === "DELETE")
         this.comments = this.comments.filter((x) => x.id !== c.id);
       return c;
@@ -241,15 +269,24 @@ export function restClient(remote, { pageSize = 100, intercept } = {}) {
           /^\/issues\/comments\?/.test(suffix) ||
           /^\/issues\/\d+\/(comments|events)(\?|$)/.test(suffix) ||
           suffix.startsWith("/labels?"));
-      let value = listing
-        ? await remote.list(suffix)
-        : endpoint === "/user"
-          ? await remote.request(method, endpoint)
-          : await remote.api(
-              method,
-              suffix,
-              options?.input ? JSON.parse(options.input) : undefined,
-            );
+      let value =
+        endpoint === "/graphql"
+          ? {
+              data: {
+                nodes: await remote.commentEditors(
+                  JSON.parse(options.input).variables.ids,
+                ),
+              },
+            }
+          : listing
+            ? await remote.list(suffix)
+            : endpoint === "/user"
+              ? await remote.request(method, endpoint)
+              : await remote.api(
+                  method,
+                  suffix,
+                  options?.input ? JSON.parse(options.input) : undefined,
+                );
       let next = "";
       if (listing) {
         const page = Number(url.searchParams.get("page") || 1),

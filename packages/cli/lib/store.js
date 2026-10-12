@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   mkdir,
   open,
@@ -7,6 +8,8 @@ import {
   unlink,
   lstat,
   realpath,
+  readdir,
+  rmdir,
 } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
@@ -67,45 +70,96 @@ export const writeJSON = (file, value) =>
 export const connectionFile = (root, client) =>
   path.join(home(), "connections", `${digest(`${root}\0${client}`)}.json`);
 
-// Serialize chat delivery and installer updates across processes on this computer.
-// OS process death releases abandoned locks; live, slow requests are never stolen.
+const heldLocks = new AsyncLocalStorage();
+function dead(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+  } catch (e) {
+    return e.code === "ESRCH";
+  }
+  return false;
+}
+// Lock order: connection -> sessions -> GitHub account. Never steal a live
+// process's lock. Publish a nonempty directory atomically, so a crash cannot
+// leave an ownerless acquisition. Unique owner names make stale cleanup safe
+// even when another waiter has already replaced the abandoned directory.
 export async function locked(file, fn) {
+  file = path.resolve(file);
+  const held = heldLocks.getStore() || new Set();
+  if (held.has(file)) throw new Error("Recursive Patchwork lock acquisition.");
   await directory(path.dirname(file));
   const lock = `${file}.lock`;
-  for (let attempt = 0; ; attempt++) {
-    try {
-      const h = await open(lock, "wx", 0o600);
-      await h.writeFile(String(process.pid));
-      await h.close();
-      break;
-    } catch (e) {
-      if (e.code !== "EEXIST") throw e;
-      let dead = false;
-      try {
-        const pid = Number(await read(lock));
-        if (pid > 0) {
-          try {
-            process.kill(pid, 0);
-          } catch (e) {
-            dead = e.code === "ESRCH";
-          }
-        }
-      } catch {}
-      if (dead) {
-        await unlink(lock).catch(() => {});
-        continue;
-      }
-      if (attempt >= 100)
-        throw new Error(
-          "Another Patchwork operation is still running. Retry shortly.",
-        );
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-  }
+  const owner = `${process.pid}-${crypto.randomUUID()}`;
+  const candidate = `${lock}.${owner}`;
+  await mkdir(candidate, { mode: 0o700 });
+  const handle = await open(path.join(candidate, owner), "wx", 0o600);
+  await handle.close();
+  const started = Date.now();
   try {
-    return await fn();
+    for (;;) {
+      try {
+        await rename(candidate, lock);
+        break;
+      } catch (e) {
+        if (
+          !["EEXIST", "ENOTEMPTY", "ENOTDIR", "EPERM", "EACCES"].includes(
+            e.code,
+          )
+        )
+          throw e;
+        try {
+          const stat = await lstat(lock);
+          if (stat.isSymbolicLink()) throw new Error("Refusing a linked lock.");
+          if (stat.isDirectory()) {
+            const owners = await readdir(lock);
+            for (const name of owners) {
+              if (
+                /^\d+-[a-f0-9-]{36}$/.test(name) &&
+                dead(Number(name.split("-")[0]))
+              )
+                await unlink(path.join(lock, name)).catch((e) => {
+                  if (e.code !== "ENOENT") throw e;
+                });
+            }
+            // rmdir cannot remove a newly published, nonempty lock.
+            await rmdir(lock).catch((e) => {
+              if (!["ENOENT", "ENOTEMPTY", "EEXIST"].includes(e.code)) throw e;
+            });
+          } else if (stat.isFile()) {
+            // Compatibility with the previous PID-file lock. unlink cannot
+            // remove a new directory lock if another cleaner won the race.
+            if (dead(Number(await read(lock))))
+              await unlink(lock).catch(() => {});
+          } else {
+            throw new Error("Invalid Patchwork lock.");
+          }
+        } catch (e) {
+          if (e.code !== "ENOENT") throw e;
+        }
+        if (Date.now() - started >= 60_000) {
+          const error = new Error(
+            "Another Patchwork operation is still running. Retry shortly; no delivery cursor was advanced.",
+          );
+          error.code = "LOCK_BUSY";
+          throw error;
+        }
+        await new Promise((resolve) =>
+          setTimeout(resolve, 75 + Math.random() * 50),
+        );
+      }
+    }
+    try {
+      return await heldLocks.run(new Set([...held, file]), fn);
+    } finally {
+      await unlink(path.join(lock, owner));
+      await rmdir(lock).catch((e) => {
+        if (!["ENOENT", "ENOTEMPTY", "EEXIST"].includes(e.code)) throw e;
+      });
+    }
   } finally {
-    await unlink(lock).catch(() => {});
+    await unlink(path.join(candidate, owner)).catch(() => {});
+    await rmdir(candidate).catch(() => {});
   }
 }
 

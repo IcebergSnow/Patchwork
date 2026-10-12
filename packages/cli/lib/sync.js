@@ -15,9 +15,19 @@ export const boardFile = (c) =>
     "github",
     `${digest(`${c.ownerId}:${c.repoId}:${c.repo.toLowerCase()}:${c.board}`)}.json`,
   );
-const merge = (old, updates) => [
-  ...new Map([...old, ...updates].map((x) => [x.id, x])).values(),
-];
+const merge = (old, updates) => {
+  const records = new Map(old.map((x) => [x.id, x]));
+  for (const value of updates) {
+    const prior = records.get(value.id);
+    records.set(
+      value.id,
+      prior?.body === value.body && prior?.updated_at === value.updated_at
+        ? { ...value, editProof: prior?.editProof || value.editProof }
+        : value,
+    );
+  }
+  return [...records.values()];
+};
 const thread = (comment) => Number(comment.issue_url?.split("/").at(-1));
 
 // Keep only fields used by Patchwork, rather than duplicating GitHub's large
@@ -44,7 +54,16 @@ function compact(value, kind) {
           "comments",
         ]
       : kind === "comment"
-        ? ["id", "body", "created_at", "updated_at", "issue_url", "html_url"]
+        ? [
+            "id",
+            "node_id",
+            "body",
+            "created_at",
+            "updated_at",
+            "issue_url",
+            "html_url",
+            "editProof",
+          ]
         : ["id", "event", "created_at"],
   );
   for (const key of ["user", "actor"])

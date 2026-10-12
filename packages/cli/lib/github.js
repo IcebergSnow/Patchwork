@@ -188,6 +188,42 @@ export class GitHub {
       ? this.get(`/repos/${this.repo}${suffix}`).then((x) => x.value)
       : this.request(method, `/repos/${this.repo}${suffix}`, body);
   }
+  // REST attributes edited comments to their ORIGINAL author. Check the editor
+  // only for changed comments, in batches; never treat editor-supplied metadata
+  // as an instruction from the original author's agent.
+  async commentEditors(ids) {
+    const query = `query($ids:[ID!]!) { nodes(ids:$ids) { ... on IssueComment {
+      id body updatedAt author { ... on Node { id } } editor { ... on Node { id } }
+      issue { repository { nameWithOwner } }
+    } } }`;
+    const raw = await this.send(
+      [
+        "api",
+        "--hostname",
+        "github.com",
+        "--method",
+        "POST",
+        "--include",
+        "/graphql",
+        "--input",
+        "-",
+      ],
+      { input: JSON.stringify({ query, variables: { ids } }) },
+      "GET", // A GraphQL read, for aggregate API accounting.
+    );
+    try {
+      const boundary = raw.search(/\r?\n\r?\n/);
+      const value = JSON.parse(
+        raw.startsWith("HTTP/") ? raw.slice(boundary).trim() : raw,
+      );
+      if (value.errors?.length || !Array.isArray(value.data?.nodes)) throw 0;
+      return value.data.nodes;
+    } catch {
+      const error = new GitHubError(0);
+      this.onResponse?.({ method: "GET", status: 0, error, count: false });
+      throw error;
+    }
+  }
   async pin(number) {
     try {
       await this.runner(

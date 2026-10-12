@@ -8,6 +8,7 @@ import {
   findBoard,
   register,
   reconcileIntervention,
+  commentOnce,
 } from "./board.js";
 import {
   connectionFile,
@@ -17,6 +18,7 @@ import {
   writeJSON,
   locked,
   directory,
+  digest,
 } from "./store.js";
 import { mergeCodex, mergeClaude, mergeHooks, parseConfig } from "./config.js";
 import { hookConfiguration, serverConfiguration } from "./connections.js";
@@ -85,6 +87,7 @@ export async function connect({
   repo,
   client,
   name,
+  agent,
   cwd,
   create = false,
   confirm = async () => false,
@@ -100,6 +103,17 @@ export async function connect({
   const file = connectionFile(root, client);
   return locked(file, async () => {
     let existing = await readJSON(file);
+    const resuming =
+      !!existing && (!existing.enabled || !!(await read(disabledFile(file))));
+    if (
+      agent &&
+      !Object.values((await readJSON(stateFile(file)))?.chats || {}).some(
+        (a) => a.id === agent,
+      )
+    )
+      throw new Error(
+        "No matching local chat. Use status --repo OWNER/REPO to find and retire a lost identity, then start a new chat.",
+      );
     if (
       existing &&
       (existing.repo.toLowerCase() !== repo.toLowerCase() ||
@@ -207,6 +221,31 @@ export async function connect({
     delete c.previousHooks;
     c.installing = false;
     await writeJSON(file, c);
+    if (resuming || agent)
+      await locked(stateFile(file), async () => {
+        const sessions = await readJSON(stateFile(file));
+        for (const chat of Object.values(sessions?.chats || {})) {
+          if (
+            agent
+              ? chat.id !== agent
+              : !!(await read(disabledFile(file, chat.id)))
+          )
+            continue;
+          chat.registered = false;
+          chat.registrationOperation = crypto.randomUUID();
+          chat.retireOperation = null;
+          chat.retirementPending = false;
+          chat.retryAfter = 0;
+          chat.lastCheck = 0;
+          chat.contextHash = null;
+          // Keep seen/initialized: a resumed chat must receive missed messages.
+        }
+        if (sessions) await writeJSON(stateFile(file), sessions);
+        if (agent)
+          await unlink(disabledFile(file, agent)).catch((e) => {
+            if (e.code !== "ENOENT") throw e;
+          });
+      });
     await unlink(disabledFile(file)).catch((e) => {
       if (e.code !== "ENOENT") throw e;
     });
@@ -218,7 +257,29 @@ export async function connect({
     return { file, connection: c };
   });
 }
-export async function status({ cwd, client } = {}) {
+async function remoteBoard(repo, github, fn) {
+  repo = repository(repo);
+  const gh = github || new GitHub(repo);
+  const { user, repo: remote } = await gh.verify();
+  const board = await findBoard(gh);
+  if (!board) throw new Error("No open Patchwork board in this repository.");
+  const c = { repo, repoId: remote.id, ownerId: user.id, board: board.number };
+  return withBoard(c, gh, async (sync) => {
+    await sync.poll(0);
+    return fn({ gh, sync, c, user });
+  });
+}
+export async function status({ cwd, client, repo, github } = {}) {
+  if (repo)
+    return remoteBoard(repo, github, async ({ sync }) => {
+      const state = await sync.view();
+      return {
+        repo,
+        board: state.board,
+        agents: state.agents,
+        warnings: state.warnings,
+      };
+    });
   const root = await projectRoot(cwd),
     results = [];
   for (const app of client ? [client] : ["codex", "claude"]) {
@@ -263,6 +324,7 @@ export async function status({ cwd, client } = {}) {
           lastBoardCheck: a.lastSuccess || null,
           lastError: a.lastError || null,
           pendingWrite: !!a.pending,
+          pendingRetirement: !!a.retirementPending,
         })),
       ),
       configured,
@@ -274,14 +336,76 @@ export async function disconnect({
   cwd,
   client,
   agent,
+  repo,
   github,
   log = console.log,
 } = {}) {
+  if (repo) {
+    if (!agent)
+      throw new Error(
+        "Remote retirement requires --agent CHAT_ID. List IDs with status --repo OWNER/REPO.",
+      );
+    return remoteBoard(repo, github, async ({ gh, sync, c, user }) => {
+      const state = await sync.view(),
+        target = state.agents.find((a) => a.agent_id === agent);
+      if (!target)
+        throw new Error("No matching registered chat on this board.");
+      const authorize = async () => {
+        await sync.authorize();
+        if (target.owner_id !== user.id) {
+          const p = await gh.api(
+            "GET",
+            `/collaborators/${encodeURIComponent(user.login)}/permission`,
+          );
+          if (
+            !["admin", "maintain"].includes(p.permission) &&
+            !p.user?.permissions?.admin &&
+            !p.user?.permissions?.maintain
+          )
+            throw new Error(
+              "Only the chat's GitHub owner or a repository maintainer/admin can retire it.",
+            );
+        }
+      };
+      await authorize();
+      // The explicit command just checked current permissions; do not let an
+      // older cached role reject a newly granted maintainer's retirement.
+      delete sync.account.permissions[c.repoId]?.[`${user.id}:${user.login}`];
+      if (target.active) {
+        const result = await commentOnce(
+          gh,
+          c.board,
+          `${user.login} retired ${target.name} (${agent}).`,
+          {
+            type: "retire",
+            agent_id: agent,
+            owner_id: user.id,
+            operation_id: digest(
+              `retire:${agent}:${target.comment_id}:${user.id}`,
+            ),
+          },
+          authorize,
+        );
+        await sync.accept(result);
+      }
+      const updated = await sync.view();
+      if (updated.agents.find((a) => a.agent_id === agent)?.active)
+        throw new Error(
+          "Retirement could not be confirmed. Read the roster and retry.",
+        );
+      await reconcileIntervention(gh, updated, authorize, (r) =>
+        sync.labels(r),
+      );
+      log(
+        `Retired chat ${agent} on GitHub. Its next board check will require explicit reconnection.`,
+      );
+    });
+  }
   const root = await projectRoot(cwd);
   let found = false;
   for (const app of client ? [client] : ["codex", "claude"]) {
-    const file = connectionFile(root, app),
-      c = await readJSON(file);
+    const file = connectionFile(root, app);
+    let c = await readJSON(file);
     if (!c) continue;
     const original = await readJSON(stateFile(file));
     if (
@@ -292,6 +416,8 @@ export async function disconnect({
     found = true;
     await write(disabledFile(file, agent), "disconnected\n");
     await locked(file, async () => {
+      c = await readJSON(file);
+      await write(disabledFile(file, agent), "disconnected\n");
       if (!agent) {
         c.enabled = false;
         await writeJSON(file, c);
@@ -324,14 +450,17 @@ export async function disconnect({
         const chats = Object.values(state?.chats || {}).filter(
           (a) => !agent || a.id === agent,
         );
+        for (const chat of chats) {
+          chat.retireOperation ??= crypto.randomUUID();
+          chat.retirementPending = true;
+        }
+        if (state) await writeJSON(stateFile(file), state);
         try {
           const gh = github || new GitHub(c.repo);
           if (chats.length)
             await withBoard(c, gh, async (sync) => {
               await sync.poll();
               for (const chat of chats) {
-                chat.retireOperation ??= crypto.randomUUID();
-                await writeJSON(stateFile(file), state);
                 const departed = await register(
                   gh,
                   c.board,
@@ -342,6 +471,7 @@ export async function disconnect({
                 );
                 await sync.accept(departed);
                 chat.registered = false;
+                chat.retirementPending = false;
                 chat.registrationOperation = crypto.randomUUID();
                 await writeJSON(stateFile(file), state);
               }

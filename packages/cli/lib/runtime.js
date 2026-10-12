@@ -46,6 +46,71 @@ function selectEvents(state, seen, maximum = LIMIT - 1000) {
   }
   return selected;
 }
+// Keyset pagination survives earlier requests closing or comments disappearing.
+// Bound this traversal to its original upper key; new/reopened older items are
+// available on a fresh traversal and through each chat's independent hook.
+function page(items, c, input) {
+  const open = !!input.open_only;
+  const key = (item) => (open ? [item.number] : [item.time, item.id]);
+  const compare = (a, b) =>
+    open
+      ? a[0] - b[0]
+      : a[0].localeCompare(b[0]) ||
+        a[1].localeCompare(b[1], "en", { numeric: true });
+  const valid = (k) =>
+    Array.isArray(k) &&
+    (open
+      ? k.length === 1 && Number.isSafeInteger(k[0]) && k[0] > 0
+      : k.length === 2 &&
+        k.every((v) => typeof v === "string" && v.length < 100));
+  let after,
+    upper = items.length ? key(items.at(-1)) : null;
+  if (input.cursor) {
+    try {
+      if (input.cursor.length > 2000) throw 0;
+      const v = JSON.parse(Buffer.from(input.cursor, "base64url").toString());
+      if (
+        v.version !== 2 ||
+        v.repo !== c.repoId ||
+        v.board !== c.board ||
+        v.open !== open ||
+        !valid(v.after) ||
+        !valid(v.upper) ||
+        compare(v.after, v.upper) > 0
+      )
+        throw 0;
+      ({ after, upper } = v);
+    } catch {
+      throw new Error(
+        "Invalid or expired cursor for this board/filter. Restart from the first page.",
+      );
+    }
+  }
+  const remaining = items.filter(
+    (item) =>
+      (!after || compare(key(item), after) > 0) &&
+      upper &&
+      compare(key(item), upper) <= 0,
+  );
+  const batch = remaining.slice(0, 30),
+    hasMore = remaining.length > 30;
+  return {
+    messages: batch,
+    hasMore,
+    nextCursor: hasMore
+      ? Buffer.from(
+          JSON.stringify({
+            version: 2,
+            repo: c.repoId,
+            board: c.board,
+            open,
+            after: key(batch.at(-1)),
+            upper,
+          }),
+        ).toString("base64url")
+      : null,
+  };
+}
 export class Runtime {
   constructor(file, { github, clock = Date.now } = {}) {
     this.file = file;
@@ -160,8 +225,20 @@ export class Runtime {
           initial ||
           chat.contextHash !== hash ||
           input.hook_event_name === "SessionStart";
-        const due = fresh || now - chat.lastReminder >= REMINDER_INTERVAL;
         const open = state.requests.filter((r) => r.state === "open");
+        const requestHash = digest(
+          JSON.stringify(
+            open.map((r) => [
+              r.number,
+              r.acknowledgments,
+              r.needsHumanIntervention,
+            ]),
+          ),
+        );
+        const due =
+          fresh ||
+          chat.requestHash !== requestHash ||
+          now - chat.lastReminder >= REMINDER_INTERVAL;
         let context = "";
         if (fresh)
           context = `Patchwork: ${c.repo}, board #${c.board}. Your agent ID: ${chat.id}. Your private chat_key for board tools: ${chat.chat_key}. Never use another chat\'s key.\n\n${AGENT_INSTRUCTIONS}\n\nRegistered chats: ${JSON.stringify(
@@ -191,7 +268,48 @@ export class Runtime {
               .join(
                 ", ",
               )}. Notify your user if this blocks you; continue independent work.\n`;
+          const noLongerUnanimous = open.filter(
+            (r) =>
+              !r.needsHumanIntervention &&
+              chat.interventions?.includes(r.number),
+          );
+          if (noLongerUnanimous.length)
+            context += `\nStill unresolved: ${noLongerUnanimous.map((r) => `#${r.number}`).join(", ")}. Needs Human Intervention no longer has unanimous declines (for example, a new chat is unanswered). This does not mean help is available or the blocker is resolved.\n`;
+          if (open.length) {
+            const start = (chat.reminderOffset || 0) % open.length;
+            const batch = [...open.slice(start), ...open.slice(0, start)].slice(
+              0,
+              20,
+            );
+            context +=
+              "\nUnresolved requests (acknowledgment is not completion):\n";
+            for (const r of batch) {
+              const active = r.acknowledgments.filter((a) => a.active);
+              const count = (response) =>
+                active.filter((a) => a.response === response).length;
+              context += `#${r.number}: your response=${r.acknowledgments.find((a) => a.agent_id === chat.id)?.response || "unanswered"}; can handle=${count("can_handle")}, cannot handle=${count("cannot_handle")}, need clarification=${count("need_clarification")}, unanswered=${count(null)}.\n`;
+            }
+            context +=
+              "Read replies and follow up on relevant pending work or clarification. If blocked, tell your user without waiting for all agents.\n";
+            chat.reminderOffset = (start + batch.length) % open.length;
+          }
         }
+        if (open.length && input.hook_event_name === "UserPromptSubmit")
+          context +=
+            "\nIf your user has explicitly expanded your scope, reevaluate affected open requests and update prior acknowledgments. Otherwise keep your existing scope.\n";
+        if (state.warnings.length)
+          context += `\n${state.warnings.slice(0, 5).join("\n")}\n`;
+        if (!initial) {
+          const ids = new Set(state.events.map((e) => e.id));
+          const removed = Object.keys(chat.seen).filter((id) => !ids.has(id));
+          if (removed.length)
+            context += `\nRemoved from the board since your last check: ${removed.slice(0, 20).join(", ")}${removed.length > 20 ? " (more removed)" : ""}. Read current requests before relying on earlier context.\n`;
+          for (const id of removed) delete chat.seen[id];
+        }
+        if (context.length > LIMIT - 1200)
+          context =
+            context.slice(0, LIMIT - 1300) +
+            "\nContext limited; use read_messages for remaining requests and warnings.\n";
         if (initial) {
           context +=
             "\nWelcome: open requests and recent context. Full history is available with read_messages.\n";
@@ -239,6 +357,10 @@ export class Runtime {
         await guard(this.file, chat.id);
         chat.initialized = true;
         chat.contextHash = hash;
+        chat.requestHash = requestHash;
+        chat.interventions = open
+          .filter((r) => r.needsHumanIntervention)
+          .map((r) => r.number);
         chat.lastCheck = now;
         chat.lastSuccess = new Date(now).toISOString();
         chat.retryAfter = 0;
@@ -264,6 +386,11 @@ export class Runtime {
         }
         throw e;
       }
+    }).catch((e) => {
+      // A busy local reader is not a failed coding checkpoint. Leave this chat's
+      // cursor untouched and retry through the next normal hook.
+      if (e.code === "LOCK_BUSY") return {};
+      throw e;
     });
   }
   async tool(name, input) {
@@ -279,7 +406,7 @@ export class Runtime {
         );
       await guard(this.file, chat.id);
       const gh = this.client(c);
-      return withBoard(
+      const result = await withBoard(
         c,
         gh,
         async (sync) => {
@@ -290,46 +417,18 @@ export class Runtime {
               "This chat is no longer registered. Reconnect it explicitly.",
             );
           if (name === "read_messages") {
-            let cursor = 0;
-            if (input.cursor) {
-              try {
-                const v = JSON.parse(
-                  Buffer.from(input.cursor, "base64url").toString(),
-                );
-                if (
-                  v.board !== c.board ||
-                  v.open !== !!input.open_only ||
-                  !Number.isSafeInteger(v.offset) ||
-                  v.offset < 0
-                )
-                  throw 0;
-                cursor = v.offset;
-              } catch {
-                throw new Error("Invalid cursor for this board/filter.");
-              }
-            }
             const items = input.open_only
               ? state.requests.filter((r) => r.state === "open")
               : state.events;
-            const batch = items.slice(cursor, cursor + 30);
+            const result = page(items, c, input);
             return {
               agents: state.agents,
               instructions: state.instructions,
-              messages: batch,
+              warnings: state.warnings,
+              ...result,
               requests: input.open_only
-                ? batch
+                ? result.messages
                 : state.requests.filter((r) => r.state === "open"),
-              hasMore: cursor + 30 < items.length,
-              nextCursor:
-                cursor + 30 < items.length
-                  ? Buffer.from(
-                      JSON.stringify({
-                        board: c.board,
-                        open: !!input.open_only,
-                        offset: cursor + 30,
-                      }),
-                    ).toString("base64url")
-                  : null,
             };
           }
           const actions = {
@@ -344,6 +443,7 @@ export class Runtime {
             throw new Error(
               "An earlier write has an uncertain result. Retry that exact operation first to avoid duplicate or reordered posts.",
             );
+          const retry = !!chat.pending;
           chat.pending ??= { fingerprint, id: randomUUID() };
           await writeJSON(stateFile(this.file), store);
           let result;
@@ -358,18 +458,20 @@ export class Runtime {
                 await guard(this.file, chat.id);
                 await sync.authorize();
               },
+              retry,
             );
           } catch (e) {
             // Validation and definite rejections can safely be corrected. Unknown
             // network/5xx results retain the same operation ID for a safe retry.
-            if (!("status" in e) || (e.status >= 400 && e.status < 500)) {
+            if (
+              !e.uncertain &&
+              (!("status" in e) || (e.status >= 400 && e.status < 500))
+            ) {
               chat.pending = null;
               await writeJSON(stateFile(this.file), store);
             }
             throw e;
           }
-          chat.pending = null;
-          await writeJSON(stateFile(this.file), store);
           let labelWarning;
           try {
             await sync.accept(result);
@@ -396,6 +498,13 @@ export class Runtime {
         },
         this.clock,
       );
+      // Keep the operation ID until the shared cache was durably saved too.
+      // A crash/failure before this point retries the same GitHub write.
+      if (name !== "read_messages") {
+        chat.pending = null;
+        await writeJSON(stateFile(this.file), store);
+      }
+      return result;
     });
   }
 }

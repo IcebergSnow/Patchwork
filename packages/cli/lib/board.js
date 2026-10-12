@@ -9,7 +9,8 @@ const START = "<!-- patchwork-instructions:start -->",
 const labels = (item) =>
   (item.labels || []).map((l) => (typeof l === "string" ? l : l.name));
 const uuid = (value) =>
-  typeof value === "string" && /^[a-f0-9-]{36}$/.test(value);
+  typeof value === "string" &&
+  /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value);
 export const responses = ["can_handle", "cannot_handle", "need_clarification"];
 const responseLabels = {
   can_handle: "Can handle",
@@ -20,21 +21,109 @@ export function metadata(body = "") {
   if (typeof body !== "string") return null;
   const match = body.match(/\n<!-- patchwork:v1:([A-Za-z0-9+/=]+) -->\s*$/);
   try {
-    return match
-      ? JSON.parse(Buffer.from(match[1], "base64").toString("utf8"))
+    if (!match || match[1].length > 8000) return null;
+    const value = JSON.parse(Buffer.from(match[1], "base64").toString("utf8"));
+    return value && typeof value === "object" && !Array.isArray(value)
+      ? value
       : null;
   } catch {
     return null;
   }
 }
 export function visible(body = "") {
-  return (body || "").replace(
+  return (typeof body === "string" ? body : "").replace(
     /\n<!-- patchwork:v1:[A-Za-z0-9+/=]+ -->\s*$/,
     "",
   );
 }
 export function marked(body, data) {
   return `${body}\n<!-- patchwork:v1:${Buffer.from(JSON.stringify(data)).toString("base64")} -->`;
+}
+function control(c) {
+  const m = metadata(c.body);
+  if (!m || !uuid(m.agent_id)) return null;
+  if (
+    m.type === "ack" &&
+    responses.includes(m.response) &&
+    (m.owner_id === undefined || m.owner_id === c.user?.id)
+  )
+    return { type: m.type, agent_id: m.agent_id, response: m.response };
+  if (m.owner_id !== c.user?.id) return null;
+  if (m.type === "retire")
+    return { type: m.type, agent_id: m.agent_id, owner_id: m.owner_id };
+  if (
+    m.type === "agent" &&
+    typeof m.active === "boolean" &&
+    ["codex", "claude"].includes(m.client) &&
+    typeof m.name === "string" &&
+    m.name.length > 0 &&
+    m.name.length <= 80
+  )
+    return {
+      type: m.type,
+      agent_id: m.agent_id,
+      owner_id: m.owner_id,
+      active: m.active,
+      client: m.client,
+      name: m.name,
+    };
+  return null;
+}
+const malformed = (c) => {
+  if (!c.body?.includes("<!-- patchwork:v1:")) return false;
+  const m = metadata(c.body);
+  return !m || (!["message", "request"].includes(m.type) && !control(c));
+};
+export async function verifyEdits(gh, comments) {
+  const pending = [];
+  for (const c of comments) {
+    const version = digest(JSON.stringify([c.body, c.updated_at]));
+    if (c.editProof?.version === version) continue;
+    // GitHub timestamps have second precision: a control comment can be edited
+    // during its creation second. Verify new marked comments as well as edits.
+    if (
+      c.created_at === c.updated_at &&
+      !metadata(c.body) &&
+      !c.body?.includes("<!-- patchwork:v1:")
+    ) {
+      c.editProof = { version, trusted: true };
+      continue;
+    }
+    // Older on-disk caches did not retain node_id. Refresh that one comment.
+    if (!c.node_id) {
+      const current = await gh.api("GET", `/issues/comments/${c.id}`);
+      if (current.body !== c.body || current.updated_at !== c.updated_at)
+        throw new Error(
+          "Comment changed during verification; retry the board check.",
+        );
+      c.node_id = current.node_id;
+    }
+    pending.push({ c, version });
+  }
+  for (let at = 0; at < pending.length; at += 50) {
+    const batch = pending.slice(at, at + 50);
+    const nodes = await gh.commentEditors(batch.map(({ c }) => c.node_id));
+    for (const { c, version } of batch) {
+      const node = nodes.find((n) => n?.id === c.node_id);
+      if (
+        !node ||
+        node.body !== c.body ||
+        Date.parse(node.updatedAt) !== Date.parse(c.updated_at) ||
+        node.issue?.repository?.nameWithOwner?.toLowerCase() !==
+          gh.repo.toLowerCase()
+      )
+        throw new Error(
+          "Comment changed during verification; retry the board check.",
+        );
+      c.editProof = {
+        version,
+        trusted:
+          !!node.author?.id &&
+          (node.author.id === node.editor?.id ||
+            (!node.editor && c.created_at === c.updated_at)),
+      };
+    }
+  }
 }
 export function instructions(body = "") {
   if (typeof body !== "string") return "";
@@ -45,7 +134,7 @@ export function instructions(body = "") {
     .slice(0, 4000);
 }
 export function boardBody(repo) {
-  return `${BOARD_MARKER}\n# Patchwork board\n\nPost announcements and questions in the comments. Create requests with the \`patchwork\` label; reply on the request and close it explicitly when resolved.\n\n[Open requests](https://github.com/${repo}/issues?q=is%3Aissue+is%3Aopen+label%3Apatchwork) · [Needs human intervention](https://github.com/${repo}/issues?q=is%3Aissue+is%3Aopen+label%3Apatchwork%3Aneeds-human)\n\n## Shared instructions (optional)\nEdit between the markers below. Keep this under 4,000 characters. Instructions do not grant agents permission to expand their scope.\n\n${START}\n\n${END}\n\nAgents introduce themselves in registration comments. Registered includes idle chats. Use Patchwork disconnect to retire finished chats; a maintainer can also change a registration comment's metadata active field to false. Acknowledgments are per chat, never assignments.\n`;
+  return `${BOARD_MARKER}\n# Patchwork board\n\nPost announcements and questions in the comments. Create requests with the \`patchwork\` label; reply on the request and close it explicitly when resolved.\n\n[Open requests](https://github.com/${repo}/issues?q=is%3Aissue+is%3Aopen+label%3Apatchwork) · [Needs human intervention](https://github.com/${repo}/issues?q=is%3Aissue+is%3Aopen+label%3Apatchwork%3Aneeds-human)\n\n## Shared instructions (optional)\nEdit between the markers below. Keep this under 4,000 characters. Instructions do not grant agents permission to expand their scope.\n\n${START}\n\n${END}\n\nAgents introduce themselves in registration comments. Registered includes idle chats. Use Patchwork disconnect to retire finished chats; use status --repo OWNER/REPO and disconnect --repo OWNER/REPO --agent CHAT_ID when local state is lost. The chat owner or a repository maintainer can retire it. Resume a local chat explicitly with connect --client APP --agent CHAT_ID. Acknowledgments are per chat, never assignments.\n`;
 }
 export async function findBoard(gh) {
   const issues = await gh.list(
@@ -151,16 +240,39 @@ export async function project(
 ) {
   const { board, comments } = records,
     boardNumber = board.number;
+  const controlComments = [
+    ...comments,
+    ...Object.values(records.requests).flatMap((r) =>
+      r.comments.filter(
+        (c) => metadata(c.body) || c.body?.includes("<!-- patchwork:v1:"),
+      ),
+    ),
+  ];
+  await verifyEdits(gh, controlComments);
+  const warnings = controlComments
+    .filter((c) => !c.editProof.trusted || malformed(c))
+    .map(
+      (c) =>
+        `Ignored unverifiable or malformed control metadata in comment:${c.id}. Review it on GitHub; restore it as the original author or remove the invalid comment.`,
+    );
+  const uncertainRoster = comments.some(
+    (c) => !c.editProof.trusted || malformed(c),
+  );
   const roster = new Map(),
     permissions = new Map();
-  async function writer(user) {
-    if (!user?.login) return false;
+  async function permission(user) {
+    if (!user?.login) return {};
     if (!permissions.has(user.id)) {
       const key = `${user.id}:${user.login}`,
         cached = permissionCache[key];
-      if (cached && now >= cached.at && now - cached.at < 300_000) {
-        permissions.set(user.id, cached.allowed);
-        return cached.allowed;
+      if (
+        cached &&
+        typeof cached.manager === "boolean" &&
+        now >= cached.at &&
+        now - cached.at < 300_000
+      ) {
+        permissions.set(user.id, cached);
+        return cached;
       }
       let p;
       try {
@@ -170,32 +282,34 @@ export async function project(
         );
       } catch (e) {
         if (e.status !== 404) throw e;
-        permissionCache[key] = { at: now, allowed: false };
-        permissions.set(user.id, false);
-        return false;
+        permissionCache[key] = { at: now, allowed: false, manager: false };
+        permissions.set(user.id, permissionCache[key]);
+        return permissionCache[key];
       }
-      permissions.set(
-        user.id,
-        !!p.user?.permissions?.push ||
+      permissions.set(user.id, {
+        allowed:
+          !!p.user?.permissions?.push ||
           ["admin", "write", "maintain"].includes(p.permission),
-      );
-      permissionCache[key] = { at: now, allowed: permissions.get(user.id) };
+        manager:
+          !!(p.user?.permissions?.admin || p.user?.permissions?.maintain) ||
+          ["admin", "maintain"].includes(p.permission),
+      });
+      permissionCache[key] = { at: now, ...permissions.get(user.id) };
     }
     return permissions.get(user.id);
   }
   for (const c of [...comments].sort((a, b) => a.id - b.id)) {
-    const m = metadata(c.body);
-    if (
-      m?.type !== "agent" ||
-      !uuid(m.agent_id) ||
-      m.owner_id !== c.user?.id ||
-      typeof m.active !== "boolean" ||
-      !["codex", "claude"].includes(m.client) ||
-      typeof m.name !== "string" ||
-      m.name.length > 80
-    )
+    const m = control(c);
+    if (!c.editProof.trusted) continue;
+    if (m?.type === "retire" && uuid(m.agent_id) && m.owner_id === c.user?.id) {
+      const old = roster.get(m.agent_id),
+        p = await permission(c.user);
+      if (old && p.allowed && (old.owner_id === c.user.id || p.manager))
+        roster.set(m.agent_id, { ...old, active: false, comment_id: c.id });
       continue;
-    if (!(await writer(c.user))) continue;
+    }
+    if (m?.type !== "agent") continue;
+    if (!(await permission(c.user)).allowed) continue;
     const old = roster.get(m.agent_id);
     if (old && old.owner_id !== c.user.id) continue;
     roster.set(m.agent_id, { ...m, login: c.user.login, comment_id: c.id });
@@ -215,6 +329,8 @@ export async function project(
         agent = m && roster.get(m.agent_id);
       if (
         m?.type === "ack" &&
+        c.editProof?.trusted &&
+        (m.owner_id === undefined || m.owner_id === c.user?.id) &&
         responses.includes(m.response) &&
         agent &&
         agent.owner_id === c.user?.id
@@ -224,6 +340,8 @@ export async function project(
     const active = [...roster.values()].filter((a) => a.active);
     const needsHumanIntervention =
       i.state === "open" &&
+      !uncertainRoster &&
+      !replies.some((c) => c.editProof?.trusted === false || malformed(c)) &&
       active.length > 0 &&
       active.every((a) => acknowledgments.get(a.agent_id) === "cannot_handle");
     requests.push({
@@ -251,6 +369,8 @@ export async function project(
       time: i.created_at,
       updated: i.updated_at,
       url: i.html_url,
+      state: i.state,
+      rawVersion: digest(i.body || ""),
     });
     events.push(...replies.map((c) => commentEvent(c, i.number)));
     events.push(
@@ -268,7 +388,12 @@ export async function project(
         })),
     );
   }
-  for (const e of events) e.version = digest(JSON.stringify([e.body, e.title]));
+  for (const e of events) {
+    e.version = digest(
+      JSON.stringify([e.body, e.title, e.rawVersion, e.state]),
+    );
+    delete e.rawVersion;
+  }
   events.sort(
     (a, b) =>
       a.time.localeCompare(b.time) ||
@@ -280,6 +405,7 @@ export async function project(
     agents: [...roster.values()],
     requests,
     events,
+    warnings,
   };
 }
 function commentEvent(c, thread) {
@@ -288,6 +414,8 @@ function commentEvent(c, thread) {
     thread,
     kind: "message",
     body: visible(c.body),
+    rawVersion: digest(c.body || ""),
+    ...(c.editProof?.trusted && control(c) ? { metadata: control(c) } : {}),
     author: c.user?.login,
     time: c.created_at,
     updated: c.updated_at,
@@ -357,8 +485,15 @@ export async function commentOnce(
 ) {
   const comments =
     knownComments || (await gh.list(`/issues/${issue}/comments`));
+  await verifyEdits(
+    gh,
+    comments.filter(
+      (c) => metadata(c.body)?.operation_id === meta.operation_id,
+    ),
+  );
   const old = comments.find(
     (c) =>
+      c.editProof?.trusted &&
       metadata(c.body)?.operation_id === meta.operation_id &&
       c.user?.id === meta.owner_id,
   );
@@ -368,7 +503,15 @@ export async function commentOnce(
     body: marked(body, meta),
   });
 }
-export async function perform(gh, c, chat, input, operationId, guard) {
+export async function perform(
+  gh,
+  c,
+  chat,
+  input,
+  operationId,
+  guard,
+  retry = true,
+) {
   const base = {
     agent_id: chat.id,
     owner_id: c.ownerId,
@@ -383,9 +526,14 @@ export async function perform(gh, c, chat, input, operationId, guard) {
     if (issue.state !== "open")
       throw new Error("Reopen the request before changing an acknowledgment.");
     const comments = await gh.list(`/issues/${input.request_id}/comments`);
+    await verifyEdits(
+      gh,
+      comments.filter((c) => metadata(c.body)?.type === "ack"),
+    );
     const last = comments
       .filter(
         (x) =>
+          x.editProof?.trusted &&
           x.user?.id === c.ownerId &&
           metadata(x.body)?.type === "ack" &&
           metadata(x.body)?.agent_id === chat.id,
@@ -417,26 +565,41 @@ export async function perform(gh, c, chat, input, operationId, guard) {
     throw new Error("Write a message between 1 and 8,000 characters.");
   if (input.kind === "request") {
     if (input.replyTo) throw new Error("Start a new issue for a request.");
+    // Only uncertain retries need an operation lookup. Include unlabeled issues:
+    // GitHub can create the issue while declining to apply its requested label.
     const existing = (
-      await gh.list(`/issues?state=all&labels=${REQUEST_LABEL}`)
+      retry
+        ? await gh.list(
+            `/issues?state=all${c.login ? `&creator=${encodeURIComponent(c.login)}` : ""}&sort=created&direction=asc`,
+          )
+        : []
     ).find(
       (i) =>
         !i.pull_request &&
         i.user?.id === c.ownerId &&
         metadata(i.body)?.operation_id === operationId,
     );
-    if (existing) return existing;
     const title = (input.title || body.split("\n")[0]).trim().slice(0, 160);
-    await guard();
-    const result = await gh.api("POST", "/issues", {
-      title,
-      body: marked(`${chat.name}:\n\n${body}`, { ...base, type: "request" }),
-      labels: [REQUEST_LABEL],
-    });
-    if (!labels(result).includes(REQUEST_LABEL))
-      throw new Error(
-        `Created #${result.number}, but GitHub did not apply the Patchwork label. Check permissions; do not recreate the request.`,
-      );
+    if (!existing) await guard();
+    const result =
+      existing ||
+      (await gh.api("POST", "/issues", {
+        title,
+        body: marked(`${chat.name}:\n\n${body}`, { ...base, type: "request" }),
+        labels: [REQUEST_LABEL],
+      }));
+    if (!labels(result).includes(REQUEST_LABEL)) {
+      try {
+        await guard();
+        await gh.api("POST", `/issues/${result.number}/labels`, {
+          labels: [REQUEST_LABEL],
+        });
+        result.labels = [...(result.labels || []), REQUEST_LABEL];
+      } catch (error) {
+        error.uncertain = true;
+        throw error;
+      }
+    }
     return result;
   }
   let thread = c.board,
