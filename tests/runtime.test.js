@@ -80,7 +80,9 @@ test("checks throttle; parallel checks do not duplicate delivery; unanswered rem
     kind: "request",
   });
   assert.deepEqual(await hook(r, "a", "PostToolUse"), {});
-  time += CHECK_INTERVAL;
+  time += 29_999;
+  assert.deepEqual(await hook(r, "a", "PostToolUse"), {});
+  time += 1;
   const results = await Promise.all([
     hook(r, "a", "PostToolUse"),
     hook(r, "a", "PostToolUse"),

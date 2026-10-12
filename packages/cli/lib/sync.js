@@ -3,7 +3,7 @@ import { home, digest, locked, readJSON, writeJSON } from "./store.js";
 import { GitHubError } from "./github.js";
 import { assertBoard, fullRecords, isRequest, project } from "./board.js";
 
-export const POLL_INTERVAL = 60_000,
+export const POLL_INTERVAL = 30_000,
   PROMPT_INTERVAL = 15_000;
 export const RECONCILE_INTERVAL = 15 * 60_000,
   OVERLAP = 120_000;

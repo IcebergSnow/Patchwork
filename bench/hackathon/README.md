@@ -304,17 +304,17 @@ or comment IDs. SessionStart or PostToolUse delivery cannot pass this path.
 
 **PostToolUse round trip, separately**
 
-5. B starts one genuine `sleep 65` shell command before the new request exists.
+5. B starts one genuine `sleep 35` shell command before the new request exists.
    The runner waits for its actual command-start event before starting A.
 6. A posts a different, uniquely marked request through MCP, then executes one
-   `sleep 95` shell command in that same turn. B's command completion triggers
-   PostToolUse after the unchanged 60-second interval; B acknowledges through
+   `sleep 65` shell command in that same turn. B's command completion triggers
+   PostToolUse after the configured 30-second interval; B acknowledges through
    MCP. A's later command completion must deliver that exact acknowledgment
    through PostToolUse. Neither receives another user prompt during this exchange.
 
 The command durations are derived from the production interval plus 5 seconds
-for B and another 30 seconds for A's return path. Production polling and hook
-configuration are unchanged. A command may need one genuine `write_stdin` wait
+for B and another 30 seconds for A's return path. The simulator does not override
+production polling or hook configuration. A command may need one genuine `write_stdin` wait
 for its completion after `exec_command` yields. Prompts request one such wait,
 not repeated short sleeps. There is no background polling model and no direct
 runner invocation of hooks or board tools. A slow write that misses the single
