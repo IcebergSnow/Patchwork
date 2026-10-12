@@ -59,7 +59,7 @@ export function subscriptionEnvironment(agent) {
     agent.env.CODEX_HOME !== agent.codex || agent.env.HOME !== path.dirname(agent.codex))
     throw fail("isolated environment override");
 }
-export async function agentAuthentication(agent, sourceText) {
+export async function agentAuthentication(agent, sourceText, { patchwork = true } = {}) {
   subscriptionEnvironment(agent);
   let text;
   try { text = await readFile(path.join(agent.codex, "auth.json"), "utf8"); }
@@ -70,6 +70,12 @@ export async function agentAuthentication(agent, sourceText) {
   subscriptionConfig(await configFile(path.join(agent.codex, "config.toml")), true);
   const project = await configFile(path.join(agent.work, ".codex/config.toml"));
   subscriptionConfig(project);
+  if (!patchwork) {
+    if (Object.keys(project.mcp_servers || {}).length) throw fail("baseline has MCP servers");
+    try { await readFile(agent.hooks); throw fail("baseline has hooks"); }
+    catch (e) { if (e.code !== "ENOENT") throw e; }
+    return;
+  }
   const normalize = v => JSON.parse(JSON.stringify(v));
   const expected = { ...serverConfiguration(agent.entry, agent.connection), env_vars: MCP_ENV };
   if (!isDeepStrictEqual(normalize(project.mcp_servers || {}), { patchwork: expected })) throw fail("unexpected MCP configuration");

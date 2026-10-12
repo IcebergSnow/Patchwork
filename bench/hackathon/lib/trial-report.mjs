@@ -1,0 +1,29 @@
+import { writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { json, ownedDirectory, redact, runId, save } from './common.mjs';
+
+export async function loadRun(output,id) {
+  const dir=path.join(output,runId(id));await ownedDirectory(dir,id);
+  const manifest=await json(path.join(dir,'manifest.json'));
+  if(manifest.runId!==id||manifest.version!==1)throw new Error('Invalid run manifest.');
+  return {dir,manifest,persist:()=>save(path.join(dir,'manifest.json'),manifest)};
+}
+export async function trialReport(run) {
+  const m=run.manifest,t=m.measurements?.tokens,g=m.grade;
+  const rows=(m.measurements?.timeline||[]).map(e=>`| ${e.time} | ${e.agent} | ${e.method} | ${e.params?.stage??e.params?.item?.tool??e.params?.run?.eventName??''} |`);
+  const body=`# Booking comparison: ${m.condition}\n\n${m.status}. Run ${m.runId}.\n\nRepository: https://github.com/${m.repo}\n\nPhase 0 remains **INCONCLUSIVE**. Prompt round trip was verified; PostToolUse return delivery was not. This run does not retroactively change that result.\n\n## Outcomes\n\n- Deterministic checks: ${g?.passed??'unavailable'}/${g?.total??8}.\n- Every role authored a commit on submitted main: ${m.integration?.allRolesOnMain??'unverified'}.\n- Valid isolated condition: ${m.validCondition??'unverified'}.\n- Live elapsed: ${m.elapsedSeconds??0}s; configured limit ${m.runtimeSeconds}s. This is completion time only when agents finished; budget stops are censored.\n- Stop: ${m.stopReason||'not started'}.\n- Reported tokens: ${t?.reportedTotal??'unavailable'} (includes ${t?.cachedInputTotal??'unknown'} cached input). Missing: ${t?.missingAgents?.join(', ')||'none'}.\n- Instrumented GitHub API calls: ${m.githubApi?.agentRequests??'unavailable'}. ${m.githubApi?.coverage||''}\n- Explicit BLOCKED messages: ${m.measurements?.blockers?.length??0}; dynamic scripted human responses: ${m.measurements?.humanInterventions??0}; scheduled prompts: ${m.measurements?.scheduledPrompts??0}.\n- Observed Git conflict/rejected-push outputs: ${m.measurements?.conflicts?.length??0}; committed scope flags: ${m.git?.scopeViolations?.length??0}; duplicate patch IDs: ${m.git?.duplicatePatches?.length??0}.\n- Cleanup: ${m.cleanup.complete?'complete':'INCOMPLETE'}${m.cleanup.errors.length?`; ${m.cleanup.errors.join('; ')}`:''}.\n${m.blocker?`\nBlocker: ${m.blocker}\n`:''}\n## Deterministic checks\n\n${(g?.checks||[]).map(c=>`- ${c.pass?'PASS':'FAIL'}: ${c.name}${c.error?` — ${c.error}`:''}`).join('\n')||'No grade available.'}\n\n## Evidence\n\n- [Full JSON](report.json) includes actual native hook records, MCP request/ack IDs in tool results, chat/session identities, scope flags and Git commit SHAs.\n- frontend.jsonl, backend.jsonl, storage.jsonl contain redacted native Codex events.\n- collaboration-before-cleanup.json contains GitHub issue/comment IDs, direct URLs, and unresolved/resolved state before any cleanup closures. collaboration.json preserves the subsequent cleanup audit. Blocker resolution is evidenced by replies/acknowledgments and the submitted code; an acknowledgment alone does not prove completed work.\n- submission.bundle and role bundles preserve submitted and unmerged committed code. Role uncommitted patches and worktree status support manual scope review.\n\n## Timeline\n\n| Time | Agent | Event | Stage / tool / hook |\n| --- | --- | --- | --- |\n${rows.join('\n')}\n\n## Limits\n\n${[...(m.limitations||[]),...(g?.limitations||[]),...(m.git?.limitations||[]),m.cleanup.retained||''].filter(Boolean).map(s=>`- ${s}`).join('\n')}\n`;
+  await save(path.join(run.dir,'report.json'),JSON.parse(redact(m)));
+  await writeFile(path.join(run.dir,'report.md'),redact(body),{mode:0o600});
+  return path.join(run.dir,'report.md');
+}
+export async function compare(baseline,enabled,output) {
+  const a=baseline.manifest,b=enabled.manifest;
+  if(a.kind!=='comparison'||b.kind!=='comparison'||a.condition!=='baseline'||b.condition!=='patchwork'||b.baselineRun!==a.runId||a.repo===b.repo||a.repository?.id===b.repository?.id)throw new Error('Select the matching sequential baseline and enabled runs.');
+  for(const key of ['model','reasoning','runtimeSeconds','tokenBudget','scenarioHash','initialCommit','codexVersion','humanScript'])if(JSON.stringify(a[key])!==JSON.stringify(b[key]))throw new Error(`Mismatched comparison control: ${key}.`);
+  if(!a.cleanup.complete||!b.cleanup.complete||Date.parse(b.startedAt)<Date.parse(a.cleanup.finishedAt))throw new Error('Conditions must run sequentially with complete cleanup.');
+  const results=[a,b].map(m=>({condition:m.condition,run:m.runId,status:m.status,valid:m.validCondition,features:m.grade?.passed??null,allRolesOnMain:m.integration?.allRolesOnMain??null,elapsedSeconds:m.elapsedSeconds,tokens:m.measurements?.tokens,githubApi:m.githubApi,scopeFlags:m.git?.scopeViolations.length??null,conflicts:m.measurements?.conflicts.length??null,humanResponses:m.measurements?.humanInterventions??null,report:path.join(m.runId,'report.md')}));
+  const result={phase0:'INCONCLUSIVE',results,interpretation:'Descriptive single-pair comparison only. Invalid/inconclusive conditions and budget-censored times cannot establish an effectiveness advantage.'};
+  const name=`comparison-${b.runId}`;await save(path.join(output,name+'.json'),result);
+  await writeFile(path.join(output,name+'.md'),`# Booking comparison\n\n${result.interpretation}\n\nPhase 0 remains INCONCLUSIVE.\n\n| Condition | Result | Features / 8 | All roles on main | Seconds | Reported tokens | Agent API calls |\n| --- | --- | --- | --- | --- | --- | --- |\n${results.map(r=>`| [${r.condition}](${r.report}) | ${r.status} | ${r.features} | ${r.allRolesOnMain} | ${r.elapsedSeconds} | ${r.tokens?.reportedTotal??'unknown'} | ${r.githubApi?.agentRequests??'unknown'} |`).join('\n')}\n`,{mode:0o600});
+  return path.join(output,name+'.md');
+}

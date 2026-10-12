@@ -1,0 +1,1 @@
+{"name":"booking-hackathon","private":true,"type":"module","scripts":{"start":"node server/main.mjs","test":"node --test test/*.test.mjs"},"engines":{"node":">=22.13"}}

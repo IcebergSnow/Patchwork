@@ -6,7 +6,7 @@ import { delay, redact } from "./common.mjs";
 // One foreground stdio app-server per independent environment. This is the real
 // Codex engine, not a hosted service or a substitute hook dispatcher.
 export class Codex {
-  constructor({ command, args, cwd, env, log, agent, runId, setupOnly = false, onEvent = () => {} }) {
+  constructor({ command, args, cwd, env, log, agent, runId, condition = "preflight", setupOnly = false, onEvent = () => {}, onRequest }) {
     this.setupOnly = setupOnly;
     this.events = [];
     this.pending = new Map();
@@ -15,7 +15,7 @@ export class Codex {
     this.child = spawn(command, args, { cwd, env, detached: true, stdio: ["pipe", "pipe", "pipe"] });
     this.child.stdin.on("error", () => {});
     const record = (method, params) => {
-      const event = { timestamp: new Date().toISOString(), runId, condition: "preflight", agent, method, params };
+      const event = { timestamp: new Date().toISOString(), runId, condition, agent, method, params };
       this.events.push(event);
       // Allowlisted protocol events only. Never persist auth/config responses,
       // raw model requests, or process environment.
@@ -40,6 +40,11 @@ export class Codex {
         if (/^(hook\/(started|completed)|turn\/(started|completed)|thread\/(started|tokenUsage\/updated)|item\/(started|completed)|model\/rerouted|error|warning)$/.test(method))
           record(method, params);
         if (message.id !== undefined) {
+          if (!setupOnly && onRequest && method === "item/tool/requestUserInput") {
+            Promise.resolve(onRequest(params)).then(result => this.send({ id: message.id, result }),
+              () => this.send({ id: message.id, error: { code: -32603, message: "Scripted response unavailable." } }));
+            return;
+          }
           // Preflight never grants arbitrary approvals or supplies fake user
           // messages. Unexpected requests are evidence of an unsupported path.
           record("protocol/unhandledRequest", { method });
@@ -58,6 +63,7 @@ export class Codex {
   }
   send(message) { this.child.stdin.write(JSON.stringify(message) + "\n"); }
   call(method, params, timeout = 75_000) {
+    if(this.exit||this.stopping)return Promise.reject(new Error("Codex process is stopped."));
     if (this.setupOnly && !["initialize", "account/read", "config/read", "model/list", "hooks/list", "thread/start", "mcpServerStatus/list"].includes(method))
       return Promise.reject(new Error("Local verification cannot submit model turns, tool calls, or authentication changes."));
     const id = ++this.nextId;

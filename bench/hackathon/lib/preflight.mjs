@@ -92,7 +92,7 @@ async function collect(run, agents) {
   }
   await run.persist();
 }
-export async function cleanup(run, clients = []) {
+export async function cleanup(run, clients = [], { retainTemporary = false } = {}) {
   const m = run.manifest;
   m.cleanup = { complete: false, errors: [] };
   await run.persist();
@@ -148,7 +148,7 @@ export async function cleanup(run, clients = []) {
       await github(m.repo, `issues/${m.board}`, { method: "PATCH", input: { state: "closed" } });
     }
   });
-  if (!m.cleanup.errors.length && m.temp) await attempt(async () => {
+  if (!m.cleanup.errors.length && m.temp && !retainTemporary) await attempt(async () => {
     const exists = await lstat(m.temp).catch((e) => { if (e.code === "ENOENT") return null; throw e; });
     if (exists) { await ownedDirectory(m.temp, m.runId); await rm(m.temp, { recursive: true }); }
   });

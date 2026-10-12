@@ -18,7 +18,7 @@ export function seatbelt(agent, runtime) {
 `;
 }
 export async function prepareRuntime(run) {
-  if (process.platform !== "darwin") throw new Error("Phase 0 currently requires macOS sandbox-exec. No fallback to unisolated processes.");
+  if (process.platform !== "darwin") throw new Error("The simulator currently requires macOS sandbox-exec. No fallback to unisolated processes.");
   const temp = await realpath(await mkdtemp(path.join(os.tmpdir(), "patchwork-sim-")));
   await save(path.join(temp, ".patchwork-sim-owner.json"), { runId: run.manifest.runId });
   run.manifest.temp = temp;
@@ -59,7 +59,7 @@ export function agentEnvironment(base, github) {
     GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0", GH_PROMPT_DISABLED: "1",
   };
 }
-export async function prepareAgent(run, id, shared, credentials) {
+export async function prepareAgent(run, id, shared, credentials, { seedCommit, comparison = run.manifest.kind === 'comparison' } = {}) {
   subscriptionAuth(credentials.codex);
   const base = path.join(run.manifest.temp, id), work = path.join(base, "project");
   const home = path.join(base, "home"), codex = path.join(home, ".codex");
@@ -73,8 +73,10 @@ export async function prepareAgent(run, id, shared, credentials) {
   await writeFile(path.join(codex, "config.toml"), `model = ${quote(run.manifest.model)}
 model_reasoning_effort = ${quote(run.manifest.reasoning)}
 ${Object.entries(AUTH_CONFIG).map(([k,v]) => `${k} = ${quote(v)}`).join("\n")}
+${comparison?'web_search = "disabled"':''}
 [features]
 hooks = true
+${comparison?'apps = false\nplugins = false\nmulti_agent = false\ncomputer_use = false\nbrowser_use = false\nin_app_browser = false\nimage_generation = false':''}
 [shell_environment_policy]
 inherit = "all"
 exclude = ["GH_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY"]
@@ -83,9 +85,19 @@ trust_level = "trusted"
 `, { mode: 0o600 });
   await command("git", ["init", "--initial-branch=main", work], { env });
   await command("git", ["-C", work, "remote", "add", "origin", `https://github.com/${run.manifest.repo}.git`], { env });
-  await writeFile(path.join(work, "README.md"), "Disposable native hook feasibility worktree. No application code.\n");
-  await command("git", ["-C", work, "add", "README.md"], { env });
-  await command("git", ["-C", work, "-c", "user.name=Patchwork simulator", "-c", "user.email=simulator@example.invalid", "commit", "-m", "Native hook preflight"], { env });
+  if (seedCommit) {
+    await command("git", ["-C", work, "config", "credential.helper", "!gh auth git-credential"], { env });
+    await command("git", ["-C", work, "fetch", "--no-tags", "origin", "main"], { env });
+    const head=(await command("git", ["-C", work, "rev-parse", "FETCH_HEAD"], { env })).trim();
+    if(head!==seedCommit)throw new Error("Starter changed during setup; refusing trial.");
+    await command("git", ["-C", work, "reset", "--hard", seedCommit], { env });
+    await command("git", ["-C", work, "config", "user.name", `Simulator ${id}`], { env });
+    await command("git", ["-C", work, "config", "user.email", `${id}@simulator.invalid`], { env });
+  } else {
+    await writeFile(path.join(work, "README.md"), "Disposable native hook feasibility worktree. No application code.\n");
+    await command("git", ["-C", work, "add", "README.md"], { env });
+    await command("git", ["-C", work, "-c", "user.name=Patchwork simulator", "-c", "user.email=simulator@example.invalid", "commit", "-m", "Native hook preflight"], { env });
+  }
   await command("git", ["-C", work, "checkout", "-b", `${run.manifest.runId}/${id}`], { env });
   const profile = path.join(base, "isolation.sb");
   await writeFile(profile, seatbelt(base, shared.runtime), { mode: 0o600 });

@@ -1,9 +1,13 @@
-# Hackathon simulator — Phase 0
+# Hackathon simulator
 
-A two-agent native Codex hook preflight, separate from Patchwork's production
-runtime. **Phase 0 is pending an authorized staged delivery trial.** The booking
-comparison is not implemented. Phase 1 requires separate user approval even if
-Phase 0 passes. No manual hook invocation counts as native delivery evidence.
+A small, isolated Codex benchmark under `bench/hackathon/`. **Phase 0 remains
+INCONCLUSIVE:** the staged live run verified the UserPromptSubmit round trip and
+receiver-side PostToolUse delivery/acknowledgment, but not the sender's return
+PostToolUse delivery. Phase 1 implementation was explicitly authorized despite
+that limitation. No manual hook invocation counts as native delivery evidence.
+
+Phase 1 is implemented and requires a separate explicit live opt-in. Ordinary
+local tests and repository setup never launch model turns.
 
 ## Requirements
 
@@ -16,6 +20,144 @@ Phase 0 passes. No manual hook invocation counts as native delivery evidence.
 - For live runs only: an explicitly named dedicated GitHub sandbox you own or
   administer, with Issues enabled and `gh` authenticated. Prefer a repository-
   restricted GitHub credential. No personal repository is a built-in default.
+
+## Phase 1: booking comparison
+
+Three independent agents own frontend (`public/`), backend (`server/`) and storage
+(`storage/`). The starter has a genuine camelCase/snake_case API mismatch and an
+unfinished persistence layer. The agents must deliver a working SQLite booking
+app, commit/push their own changes, and integrate into remote `main` themselves.
+The runner never implements, merges, assigns dependencies, or relays board messages.
+
+Both conditions use the same starter commit, requirements, scopes, model/effort,
+budgets, Codex version and scripted human responses. Baseline has normal shell,
+Git and `gh`, with no Patchwork MCP/hooks. Enabled adds actual Patchwork MCP and
+native hooks, including the unchanged production polling interval. Account apps,
+plugins, nested-agent tools, web search and computer/browser control are disabled
+in both conditions. These simulator-only settings follow the
+[official configuration guidance](https://learn.chatgpt.com/docs/enterprise/managed-configuration#configure-network-access-requirements).
+
+Each condition starts three independent app-server processes and sessions with
+separate homes, auth copies, Git clones, Patchwork homes and cursors. Their editing
+scopes are user instructions, not a new Patchwork role-management system. Sessions
+receive the same two human checkpoints at 180 and 420 seconds, deferred until the
+current turn finishes. The first permits shared root-file edits; neither permits
+editing peer directories. Interactive questions receive one fixed scope-preserving
+response. Agents may finish blocked while the runner waits locally for a checkpoint:
+there are no model-driven wait loops. Actual delivery times and responses are logged.
+
+### Optional private repository setup
+
+```sh
+npm run sim -- setup \
+  --baseline-repo YOUR_ACCOUNT/BookingBaseline \
+  --patchwork-repo YOUR_ACCOUNT/BookingEnabled --allow-create
+npm run sim -- validate-setup \
+  --baseline-repo YOUR_ACCOUNT/BookingBaseline \
+  --patchwork-repo YOUR_ACCOUNT/BookingEnabled
+```
+
+`setup` uses existing `gh` authentication, creates only missing private repositories
+under the active personal account, and initializes both with the same deterministic
+commit. It inspects existing repositories and leaves them untouched, even if empty.
+An interrupted creation/push is journaled; setup never force-pushes or repairs an
+existing repository. `validate-setup` is read-only and requires private repositories
+with exactly the starter commit on `main`, no other branches, tags or issue history.
+Source-repository names are refused. No personal sandbox is hardcoded.
+
+Two fresh repositories form one comparison pair. Conditions run sequentially,
+with a local lock and unfinished-cleanup guard. Enabled requires the baseline run
+ID, checks every control and the pre-authorized enabled repository's immutable ID,
+and refuses changed or contaminated starting state. Keep the same output directory
+and reserve both repositories exclusively for this experiment. The local lock does
+not coordinate runners on different computers.
+
+### Commands (only after live authorization)
+
+```sh
+npm run sim -- trial --condition baseline \
+  --repo YOUR_ACCOUNT/BookingBaseline --peer-repo YOUR_ACCOUNT/BookingEnabled \
+  --sandbox-repo --allow-live --model gpt-6-luna --reasoning low \
+  --seconds 900 --tokens 1000000 --codex /path/to/codex
+
+npm run sim -- trial --condition patchwork \
+  --repo YOUR_ACCOUNT/BookingEnabled --baseline-run BASELINE_RUN_ID \
+  --sandbox-repo --allow-live --model gpt-6-luna --reasoning low \
+  --seconds 900 --tokens 1000000 --codex /path/to/codex
+
+npm run sim -- compare --baseline-run BASELINE_RUN_ID --patchwork-run ENABLED_RUN_ID
+```
+
+Recommended initial limits: **15 minutes and 1,000,000 reported tokens per
+condition**, across all three agents, including cached input. These are stop
+thresholds, not consumption forecasts; in-flight calls can overshoot. The pair
+therefore allows up to 30 live minutes and approximately 2,000,000 reported tokens,
+plus setup/grading/cleanup time. Runtime is configurable from 30–1800 seconds.
+Short limits may end before both scripted checkpoints; reports record that rather
+than silently changing the script. The runner never upgrades models or retries a
+live condition automatically. Subscription allowance percentage cannot be predicted.
+
+`caffeinate -i -s` prevents idle macOS sleep while agents run and exits when the
+runner dies; lid closure or manual sleep can still interrupt a trial. Time and token
+limits terminate entire agent process groups. Keep the laptop open and powered.
+
+### External grading, evidence and cleanup
+
+The grader checks the published `main` snapshot under a separate OS sandbox,
+without credentials or access to agents' homes. Tests and reference solutions live
+outside editable workspaces. Eight deterministic checks cover slots, booking/list,
+validation, atomic duplicate prevention, UI module/selector wiring, the real browser
+API client against HTTP, restart persistence, and SQLite/availability integration.
+UI wiring is a smoke test, not a full browser usability assessment. Agents know the
+public requirements but cannot modify the grader.
+
+Reports include redacted native hooks/MCP results and IDs, tokens (cached included),
+Git SHAs, code bundles, uncommitted tracked patches, worktree status, conflicts,
+authored scope flags, duplicate patch IDs, overlapping files, blocker messages and
+scripted human interventions. `collaboration-before-cleanup.json` captures issue
+state and comments before cleanup closes anything. Acknowledgments or closure alone
+never prove that a dependency was fixed. Review direct GitHub links and code evidence.
+Authored commit metadata supports scope review but is not tamper-proof. Untracked
+files appear in worktree status but their content is not archived.
+
+The instrumented `gh` counts actual HTTP requests from agent shells and Patchwork
+MCP/hooks, including isolated installation. A separate `liveRequests` count excludes
+pre-launch installation. It discards debug headers/bodies and records only verb/time.
+Host-side setup, grading fetches, cleanup, Git transport, direct HTTP and an absolute-path bypass of
+`gh` are excluded; reports state this coverage. It is not account-wide accounting.
+
+Cleanup stops agents, retires only owned chats, closes owned requests/issues/PRs,
+and removes owned role branches with an atomic expected-SHA lease. Foreign resources,
+changed accounts, or uncertain ownership cause cleanup to fail closed and retain
+local recovery state. `reset --run ID --allow-live` retries cleanup. Credentials and
+operational temporary directories are removed only after cleanup succeeds.
+Repositories, final main, closed GitHub history/labels, and local reports/bundles are
+retained intentionally for review. No command deletes or resets a repository. Use a
+new pair of names for another comparison; consumed repositories are refused.
+
+PASS means all eight checks pass, every role contributed to submitted main, expected
+session/identity/native-startup evidence exists, token accounting is available, and
+cleanup succeeded. FAIL denotes an incomplete application in a valid condition;
+INCONCLUSIVE denotes missing evidence or infrastructure/cleanup failure. Budget
+stops are censored time observations, not completion times. One sequential pair
+provides descriptive evidence, not a statistically reliable effectiveness claim.
+
+### Free checks
+
+```sh
+npm run test:sim
+npm test
+npm run build
+npm run sim -- check-local --phase1 --condition baseline --codex /path/to/codex
+npm run sim -- check-local --phase1 --condition patchwork --codex /path/to/codex
+```
+
+These configuration checks start three independent sessions, verify subscription
+mode, exact model/effort and expected tool/hook inventory, then clean up. Patchwork
+connections are disabled with a nonworking GitHub credential. There are no model
+turns, live registrations, or board messages. This does not claim live three-agent
+integration is verified. Current runner/grader isolation requires macOS; other
+platforms fail closed.
 
 ## Subscription-only authentication
 
@@ -45,7 +187,11 @@ The environment is built from an allowlist: `OPENAI_API_KEY`, `CODEX_API_KEY`,
 provider overrides, and external Codex auth tokens are never inherited. The
 separate `GH_TOKEN` is forwarded only to Patchwork's MCP server and native startup
 hook; it is excluded from model-run shell commands. MCP config contains variable
-names, never credential values. Credential files live only in private temporary
+names, never credential values. Phase 1 also writes a mode-0600 credential file in each
+isolated `GH_CONFIG_DIR` so ordinary Git/GitHub tools work equally in both conditions.
+Credentials are outside the project and never committed. The existing GitHub token
+retains its original permissions; sandbox repository scope is an experiment
+instruction, not a server-side restriction on that token. Credential files live only in private temporary
 homes and are removed during successful cleanup.
 
 This consumes the ChatGPT account's Codex allowance/credits, not API-key billing.
@@ -206,18 +352,15 @@ local report directory after successful cleanup. No command deletes repositories
 
 GitHub registration, retirement, request, and acknowledgment history remains.
 A preflight can reuse a test board, but this does not make it a clean benchmark
-repository. Phase 1 would need separate fresh baseline/Patchwork repositories.
+repository. Phase 1 requires separate fresh baseline/Patchwork repositories.
 
-## Current evidence
+## Current Phase 0 evidence
 
-Earlier live trials proved native startup and independent registration but did
-not prove complete delivery: the first encountered hook trust configuration;
-the corrected trial encountered missing MCP credential forwarding. Both are now
-addressed in simulator configuration. Prior chats were retired and environments
-removed. The latest 100,000-token trial also proved A's real MCP request but stopped before
-the next eligible tool poll. These runs remain INCONCLUSIVE; local verification
-does not change their results. No staged live trial is authorized yet.
+The staged live run `sim-2026-10-12T16-59-54-992Z-a71d6963` remains INCONCLUSIVE.
+It verified native startup, independent registrations, the complete UserPromptSubmit
+round trip, and Agent B receiving/acknowledging through PostToolUse. Agent A's return
+PostToolUse check encountered GitHub network/timeouts. Reported usage was 295,928
+including 265,984 cached input tokens. macOS sleep extended wall time beyond the
+configured 300 seconds; Phase 1 now prevents idle sleep. Cleanup succeeded.
 
-This runner uses process-based macOS isolation and the same GitHub account for
-both chats. It has no baseline comparison, booking scenario, automatic merging,
-background service, or claim that Patchwork improves outcomes.
+Phase 1 implementation is authorized. No live three-agent comparison has been run.

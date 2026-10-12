@@ -63,7 +63,8 @@ export async function ownedDirectory(dir, id) {
 }
 export async function newRun(options) {
   const seconds = Number(options.seconds || 300), tokens = Number(options.tokens || 250_000);
-  if (!(Number.isInteger(seconds) && seconds >= 30 && seconds <= 300)) throw new Error("Phase 0 supports a total 30–300 second live session budget.");
+  const maximum=options.kind === 'comparison' ? 1800 : 300;
+  if (!(Number.isInteger(seconds) && seconds >= 30 && seconds <= maximum)) throw new Error(`Phase ${options.kind==='comparison'?'1':'0'} supports a total 30–${maximum} second live session budget.`);
   if (!Number.isSafeInteger(tokens) || tokens < 1000) throw new Error("--tokens must be an integer of at least 1000.");
   const id = `sim-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}`;
   const output = path.resolve(options.output || defaultOutput);
@@ -72,7 +73,7 @@ export async function newRun(options) {
   const dir = path.join(output, id);
   await mkdir(dir, { mode: 0o700 });
   await save(path.join(dir, ".patchwork-sim-owner.json"), { runId: id });
-  const manifest = { version: 1, runId: id, kind: "preflight", createdAt: new Date().toISOString(), status: "INCONCLUSIVE", repo: options.repo,
+  const manifest = { version: 1, runId: id, kind: options.kind || "preflight", createdAt: new Date().toISOString(), status: "INCONCLUSIVE", repo: options.repo,
     model: options.model || "gpt-6-luna", reasoning: options.reasoning || "low", runtimeSeconds: seconds, tokenBudget: tokens,
     agents: [], resources: [], cleanup: { complete: false, errors: [] }, evidence: {}, limitations: [
       "Same GitHub account for both agents; separate chat identities and local state.",
