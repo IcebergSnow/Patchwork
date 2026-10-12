@@ -24,8 +24,8 @@
     "directory": "packages/cli"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
     "smol-toml": "1.9.1",
-    "@modelcontextprotocol/sdk": "1.30.0",
     "zod": "^4.0.0"
   }
 }
