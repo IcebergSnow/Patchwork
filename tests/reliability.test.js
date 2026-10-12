@@ -39,7 +39,7 @@ import {
 import { connect, disconnect, status } from "../packages/cli/lib/connect.js";
 
 const hook = (r, session = "a", event = "UserPromptSubmit") =>
-  r.hook({ session_id: session, hook_event_name: event });
+  r.hook({ transcript_path: "/test/transcript.jsonl", session_id: session, hook_event_name: event });
 const text = (value) => value.hookSpecificOutput?.additionalContext || "";
 const chats = async (file) =>
   Object.values((await readJSON(stateFile(file))).chats);

@@ -103,8 +103,12 @@ export async function connect({
   const file = connectionFile(root, client);
   return locked(file, async () => {
     let existing = await readJSON(file);
+    // The disable marker also protects an in-progress installation. Retrying
+    // that installation must not reactivate remotely retired chats. Preserve
+    // explicit project-reconnect intent across an interrupted install instead.
     const resuming =
-      !!existing && (!existing.enabled || !!(await read(disabledFile(file))));
+      !!existing &&
+      (!existing.enabled || (existing.installing && existing.resumeChats));
     if (
       agent &&
       !Object.values((await readJSON(stateFile(file)))?.chats || {}).some(
@@ -183,6 +187,7 @@ export async function connect({
       version: 1,
       enabled: true,
       installing: true,
+      resumeChats: !!resuming,
       previousServer,
       previousHooks,
       root,
@@ -217,10 +222,6 @@ export async function connect({
     await checkUntracked(root, files.hooks);
     if (nextConfig !== before.config) await write(files.config, nextConfig);
     if (nextHooks !== before.hooks) await write(files.hooks, nextHooks);
-    delete c.previousServer;
-    delete c.previousHooks;
-    c.installing = false;
-    await writeJSON(file, c);
     if (resuming || agent)
       await locked(stateFile(file), async () => {
         const sessions = await readJSON(stateFile(file));
@@ -246,6 +247,11 @@ export async function connect({
             if (e.code !== "ENOENT") throw e;
           });
       });
+    delete c.previousServer;
+    delete c.previousHooks;
+    delete c.resumeChats;
+    c.installing = false;
+    await writeJSON(file, c);
     await unlink(disabledFile(file)).catch((e) => {
       if (e.code !== "ENOENT") throw e;
     });

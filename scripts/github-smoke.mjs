@@ -63,6 +63,7 @@ async function startup(file, session) {
     const welcome = JSON.parse(
       await run(process.execPath, [ENTRY, "hook", "--connection", file], {
         input: JSON.stringify({
+          transcript_path: path.join(dir, "test-transcript.jsonl"),
           session_id: session,
           hook_event_name: "SessionStart",
           prompt: "Do not upload this prompt",
@@ -200,6 +201,7 @@ try {
     ),
   );
   const delivered = await call(b.client, "check_board", {
+    transcript_path: path.join(dir, "test-transcript.jsonl"),
     session_id: "smoke-1",
     hook_event_name: "UserPromptSubmit",
   });

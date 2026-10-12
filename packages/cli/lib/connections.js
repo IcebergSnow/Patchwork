@@ -39,6 +39,7 @@ export function hookConfiguration(entry, file) {
                   input: {
                     session_id: "${session_id}",
                     hook_event_name: "${hook_event_name}",
+                    transcript_path: "${transcript_path}",
                   },
                 },
               ],

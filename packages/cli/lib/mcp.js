@@ -4,7 +4,7 @@ import { z } from "zod";
 import { Runtime } from "./runtime.js";
 
 export function server(runtime) {
-  const mcp = new McpServer({ name: "patchwork", version: "0.2.0" });
+  const mcp = new McpServer({ name: "patchwork", version: "0.2.1" });
   const key = z
     .string()
     .uuid()
@@ -48,6 +48,7 @@ export function server(runtime) {
           "UserPromptSubmit",
           "PostToolUse",
         ]),
+        transcript_path: z.string().max(32768).nullable().optional(),
       })
       .strict(),
   );

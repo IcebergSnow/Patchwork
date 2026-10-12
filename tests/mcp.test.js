@@ -9,7 +9,7 @@ import { connection } from "./fixtures.js";
 test("real MCP protocol exposes narrow tools, rejects old recipient parameters and isolates chat acknowledgments", async (t) => {
   const { file, gh } = await connection(t);
   const runtime = new Runtime(file, { github: gh });
-  await runtime.hook({ session_id: "one", hook_event_name: "SessionStart" });
+  await runtime.hook({ transcript_path: "/test/transcript.jsonl", session_id: "one", hook_event_name: "SessionStart" });
   const chat = Object.values((await readJSON(stateFile(file))).chats)[0];
   const mcp = server(runtime),
     client = new Client({ name: "test", version: "1" });
@@ -27,6 +27,31 @@ test("real MCP protocol exposes narrow tools, rejects old recipient parameters a
     "read_messages",
     "resolve_request",
   ]);
+  const calls = gh.calls;
+  for (const hook_event_name of ["SessionStart", "UserPromptSubmit", "PostToolUse"]) {
+    const ignored = await client.callTool({
+      name: "check_board",
+      arguments: { session_id: "ephemeral-helper", hook_event_name, transcript_path: null },
+    });
+    assert(!ignored.isError);
+    assert.deepEqual(JSON.parse(ignored.content[0].text), {});
+  }
+  const oldHook = await client.callTool({
+    name: "check_board",
+    arguments: { session_id: "unknown", hook_event_name: "UserPromptSubmit" },
+  });
+  assert(oldHook.isError);
+  assert.match(oldHook.content[0].text, /Rerun connect/);
+  assert.equal(gh.calls, calls);
+  const welcome = await client.callTool({
+    name: "check_board",
+    arguments: { session_id: "two", hook_event_name: "SessionStart", transcript_path: "C:\\Codex\\sessions\\saved.jsonl" },
+  });
+  assert(!welcome.isError);
+  const [first, second] = Object.values((await readJSON(stateFile(file))).chats);
+  assert.notEqual(first.id, second.id);
+  assert.notEqual(first.chat_key, second.chat_key);
+  assert(!JSON.stringify(await readJSON(stateFile(file))).includes("saved.jsonl"));
   const posted = await client.callTool({
     name: "post_message",
     arguments: {

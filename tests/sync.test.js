@@ -273,7 +273,7 @@ test("rate limits and transient backoff are shared across chats and manual tools
     clock: x.clock,
   });
   await assert.rejects(
-    other.hook({ session_id: "new", hook_event_name: "SessionStart" }),
+    other.hook({ transcript_path: "/test/transcript.jsonl", session_id: "new", hook_event_name: "SessionStart" }),
   );
   assert.equal(
     (await readJSON(accountFile(x.c))).stats.requests,
@@ -292,19 +292,20 @@ test("rate limits and transient backoff are shared across chats and manual tools
 test("independent chat cursors recover after shared cache progress and failed delivery", async (t) => {
   const x = await setup(t),
     r = new Runtime(x.file, { github: x.gh, clock: x.clock });
-  await r.hook({ session_id: "a", hook_event_name: "SessionStart" });
-  await r.hook({ session_id: "b", hook_event_name: "SessionStart" });
+  await r.hook({ transcript_path: "/test/transcript.jsonl", session_id: "a", hook_event_name: "SessionStart" });
+  await r.hook({ transcript_path: "/test/transcript.jsonl", session_id: "b", hook_event_name: "SessionStart" });
   await x.remote.api("POST", "/issues/1/comments", {
     body: "Everyone sees this",
   });
   x.advance(60000);
-  const a = await r.hook({ session_id: "a", hook_event_name: "PostToolUse" });
+  const a = await r.hook({ transcript_path: "/test/transcript.jsonl", session_id: "a", hook_event_name: "PostToolUse" });
   const before = (await readJSON(accountFile(x.c))).stats.requests;
   const restarted = new Runtime(x.file, {
     github: restClient(x.remote),
     clock: x.clock,
   });
   const b = await restarted.hook({
+    transcript_path: "/test/transcript.jsonl",
     session_id: "b",
     hook_event_name: "PostToolUse",
   });
@@ -348,7 +349,7 @@ test("successful writes update the shared cache without rescanning historical th
   const x = await setup(t),
     r = new Runtime(x.file, { github: x.gh, clock: x.clock });
   for (let i = 0; i < 10; i++) await x.issue();
-  await r.hook({ session_id: "a", hook_event_name: "SessionStart" });
+  await r.hook({ transcript_path: "/test/transcript.jsonl", session_id: "a", hook_event_name: "SessionStart" });
   const chat = Object.values((await readJSON(stateFile(x.file))).chats)[0];
   x.remote.history = [];
   await r.tool("post_message", {
@@ -386,13 +387,13 @@ test("a remotely retired chat cannot refresh intervention labels", async (t) => 
       response: "cannot_handle",
     }),
   });
-  await runtime.hook({ session_id: "a", hook_event_name: "SessionStart" });
+  await runtime.hook({ transcript_path: "/test/transcript.jsonl", session_id: "a", hook_event_name: "SessionStart" });
   const chat = Object.values((await readJSON(stateFile(x.file))).chats)[0];
   await register(x.remote, x.c.board, chat, false, "retire");
   x.remote.history = [];
   x.advance(60000);
   await assert.rejects(
-    runtime.hook({ session_id: "a", hook_event_name: "UserPromptSubmit" }),
+    runtime.hook({ transcript_path: "/test/transcript.jsonl", session_id: "a", hook_event_name: "UserPromptSubmit" }),
     /retired/,
   );
   assert(x.remote.history.every((call) => call.method === "GET"));

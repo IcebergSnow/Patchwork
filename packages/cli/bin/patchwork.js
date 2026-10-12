@@ -20,7 +20,7 @@ Disconnect without --agent disables the selected app (both apps if omitted).
 Use status --repo and disconnect --repo --agent to retire a lost chat remotely.
 Use connect --client APP --agent CHAT_ID to explicitly resume a local chat.
 GitHub credentials remain with gh. No Cloudflare account or pairing code.
-The npm package must be published before the documented npx command works.
+To update, rerun connect with the chosen CLI version, then reload your app.
 `;
 async function ask(question) {
   if (!process.stdin.isTTY)
@@ -122,12 +122,14 @@ try {
         if (raw.length > 1_000_000) throw new Error("Hook input too large.");
       }
       const input = JSON.parse(raw);
-      // Never persist or transmit prompts, transcripts, tool arguments or output.
+      // The transcript path only distinguishes saved Codex chats from ephemeral
+      // helpers. Never read/persist/upload transcripts, prompts or tool output.
       console.log(
         JSON.stringify(
           await new Runtime(connection).hook({
             session_id: input.session_id,
             hook_event_name: input.hook_event_name,
+            transcript_path: input.transcript_path,
           }),
         ),
       );

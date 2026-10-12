@@ -7,13 +7,57 @@ import {
   disabledFile,
   CHECK_INTERVAL,
 } from "../packages/cli/lib/runtime.js";
-import { readJSON, write } from "../packages/cli/lib/store.js";
+import { readJSON, write, writeJSON } from "../packages/cli/lib/store.js";
 import { metadata } from "../packages/cli/lib/board.js";
 const hook = (r, id, event = "SessionStart") =>
-  r.hook({ session_id: id, hook_event_name: event });
+  r.hook({ transcript_path: "/test/transcript.jsonl", session_id: id, hook_event_name: event });
 const text = (r) => r.hookSpecificOutput?.additionalContext || "";
 const chats = async (file) =>
   Object.values((await readJSON(stateFile(file))).chats);
+test("Codex ephemeral helpers never register, poll, or change delivery state", async (t) => {
+  const { file, gh } = await connection(t);
+  const r = new Runtime(file, { github: gh });
+  const before = gh.calls;
+  for (const event of ["SessionStart", "UserPromptSubmit", "PostToolUse"])
+    for (const transcript_path of [null, ""])
+      assert.deepEqual(await r.hook({
+        session_id: "composer-helper", hook_event_name: event, transcript_path,
+      }), {});
+  assert.equal(gh.calls, before);
+  assert.equal(await readJSON(stateFile(file)), null);
+
+  await hook(r, "real-chat");
+  const [a] = await chats(file);
+  const req = await r.tool("post_message", {
+    chat_key: a.chat_key, kind: "request", body: "Need help",
+  });
+  await r.tool("acknowledge_request", {
+    chat_key: a.chat_key, request_id: req.number, response: "cannot_handle",
+  });
+  const saved = await readJSON(stateFile(file)), calls = gh.calls;
+  // Even a helper accidentally presenting a saved session's ID must be ignored.
+  await r.hook({ session_id: "real-chat", hook_event_name: "UserPromptSubmit", transcript_path: null });
+  assert.equal(gh.calls, calls);
+  assert.deepEqual(await readJSON(stateFile(file)), saved);
+  const board = await r.tool("read_messages", { chat_key: a.chat_key, open_only: true });
+  assert.equal(board.agents.length, 1);
+  assert.equal(board.requests[0].needsHumanIntervention, true);
+});
+test("Codex requires transcript metadata before registration; Claude remains compatible", async (t) => {
+  const { file, gh } = await connection(t);
+  const r = new Runtime(file, { github: gh });
+  const before = gh.calls;
+  for (const transcript_path of [undefined, 42, "${transcript_path}", "   "])
+    await assert.rejects(r.hook({
+      session_id: "unknown", hook_event_name: "SessionStart", transcript_path,
+    }), /transcript metadata.*connect/i);
+  assert.equal(gh.calls, before);
+  assert.equal(await readJSON(stateFile(file)), null);
+  const c = await readJSON(file);
+  await writeJSON(file, { ...c, client: "claude" });
+  assert.match(text(await r.hook({ session_id: "claude-chat", hook_event_name: "SessionStart" })), /Your agent ID/);
+  assert.equal((await chats(file)).length, 1);
+});
 test("separate chats have separate identities, responses and cursors; resume preserves identity", async (t) => {
   const { file, gh } = await connection(t);
   let time = 1000000;

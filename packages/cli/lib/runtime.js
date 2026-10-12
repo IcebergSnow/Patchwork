@@ -130,6 +130,24 @@ export class Runtime {
       )
     )
       throw new Error("Invalid hook session metadata.");
+    if ((await guard(this.file)).client === "codex") {
+      // Codex also runs hooks in ephemeral app helpers (e.g. composer
+      // suggestions). Only saved conversations belong on the board. Check
+      // native metadata before creating an identity, a lock, or any API calls;
+      // never read, store, or upload the transcript itself or its path.
+      if (input.transcript_path === null || input.transcript_path === "")
+        return {};
+      if (
+        typeof input.transcript_path !== "string" ||
+        !input.transcript_path.trim() ||
+        input.transcript_path.length > 32768 ||
+        input.transcript_path.includes("${") ||
+        input.transcript_path.includes("\0")
+      )
+        throw new Error(
+          "Codex transcript metadata is unavailable. Rerun connect with the current CLI, then restart/reload Codex and approve the updated hooks.",
+        );
+    }
     return locked(stateFile(this.file), async () => {
       const c = await guard(this.file),
         now = this.clock();

@@ -19,8 +19,8 @@ import {
   status,
   ENTRY,
 } from "../packages/cli/lib/connect.js";
-import { read, write, readJSON } from "../packages/cli/lib/store.js";
-import { Runtime, stateFile } from "../packages/cli/lib/runtime.js";
+import { read, write, readJSON, writeJSON } from "../packages/cli/lib/store.js";
+import { Runtime, stateFile, disabledFile } from "../packages/cli/lib/runtime.js";
 import { run } from "../packages/cli/lib/github.js";
 import { FakeGitHub, gitProject, temporary } from "./fixtures.js";
 const server = {
@@ -122,11 +122,58 @@ test("startup hook transports argv as data, not shell syntax; MCP hooks exclude 
   ]);
   const h = hookConfiguration(entry, file);
   assert.equal(h.hooks.SessionStart[0].hooks[0].type, "command");
+  for (const event of ["UserPromptSubmit", "PostToolUse"])
+    assert.equal(h.hooks[event][0].hooks[0].input.transcript_path, "${transcript_path}");
   assert(
     !new RegExp(h.hooks.PostToolUse[0].matcher).test(
       "mcp__patchwork__post_message",
     ),
   );
+});
+test("command hooks forward only session metadata, including nullable transcript paths", async (t) => {
+  const dir = await temporary(t), preload = path.join(dir, "assert-hook.mjs");
+  const runtimeURL = new URL("../packages/cli/lib/runtime.js", import.meta.url).href;
+  await write(preload, `import assert from "node:assert/strict";
+import { Runtime } from ${JSON.stringify(runtimeURL)};
+Runtime.prototype.hook = async function(input) {
+  assert.deepEqual(Object.keys(input).sort(), ["hook_event_name", "session_id", "transcript_path"]);
+  assert.equal(input.transcript_path, process.env.EXPECT_PATH || null);
+  return {};
+};`);
+  for (const transcript_path of [null, path.join(dir, "saved.jsonl")]) {
+    const output = await run(process.execPath, ["--import", preload, ENTRY, "hook", "--connection", path.join(dir, "connection.json")], {
+      env: { ...process.env, EXPECT_PATH: transcript_path || "" },
+      input: JSON.stringify({ session_id: "test", hook_event_name: "SessionStart", transcript_path, prompt: "private prompt", tool_output: "private output", transcript: "private transcript" }),
+    });
+    assert.deepEqual(JSON.parse(output), {});
+  }
+});
+
+test("upgrading old hooks forwards transcript metadata once and keeps unrelated handlers", async (t) => {
+  const root = await gitProject(t), dir = await temporary(t);
+  process.env.PATCHWORK_HOME = dir;
+  t.after(() => delete process.env.PATCHWORK_HOME);
+  const gh = new FakeGitHub(), params = {
+    cwd: root, client: "codex", repo: gh.repo, github: gh, create: true, log: () => {},
+  };
+  const { file } = await connect(params), c = await readJSON(file);
+  const legacy = hookConfiguration(ENTRY, file);
+  for (const groups of Object.values(legacy.hooks))
+    for (const group of groups)
+      for (const h of group.hooks)
+        if (h.input) delete h.input.transcript_path;
+  c.ownedHooks = Object.values(legacy.hooks).flatMap((g) => g.flatMap((x) => x.hooks));
+  legacy.hooks.UserPromptSubmit.push({ hooks: [{ type: "command", command: "echo keep" }] });
+  await writeJSON(file, c);
+  await writeJSON(c.files.hooks, legacy);
+  await connect(params);
+  const upgraded = await read(c.files.hooks);
+  await connect(params);
+  assert.equal(await read(c.files.hooks), upgraded);
+  const groups = JSON.parse(upgraded).hooks.UserPromptSubmit;
+  assert.equal(groups.length, 2);
+  assert.equal(groups[0].hooks[0].command, "echo keep");
+  assert.equal(groups[1].hooks[0].input.transcript_path, "${transcript_path}");
 });
 test("first install, repeated install, separate chats, disconnect, reconnect all preserve unrelated configs", async (t) => {
   const root = await gitProject(t),
@@ -149,8 +196,8 @@ test("first install, repeated install, separate chats, disconnect, reconnect all
   assert.equal(await read(path.join(root, ".codex/config.toml")), config);
   assert.equal(gh.issues.length, 1);
   const r = new Runtime(file, { github: gh });
-  await r.hook({ session_id: "one", hook_event_name: "SessionStart" });
-  await r.hook({ session_id: "two", hook_event_name: "SessionStart" });
+  await r.hook({ transcript_path: "/test/transcript.jsonl", session_id: "one", hook_event_name: "SessionStart" });
+  await r.hook({ transcript_path: "/test/transcript.jsonl", session_id: "two", hook_event_name: "SessionStart" });
   const [a, b] = Object.values((await readJSON(stateFile(file))).chats);
   await disconnect({ cwd: root, agent: a.id, github: gh, log: () => {} });
   await assert.rejects(
@@ -165,12 +212,12 @@ test("first install, repeated install, separate chats, disconnect, reconnect all
     "keep",
   );
   await assert.rejects(
-    r.hook({ session_id: "new", hook_event_name: "SessionStart" }),
+    r.hook({ transcript_path: "/test/transcript.jsonl", session_id: "new", hook_event_name: "SessionStart" }),
     /disconnected/,
   );
   await connect(params);
   assert.equal((await status({ cwd: root }))[0].enabled, true);
-  await r.hook({ session_id: "new", hook_event_name: "SessionStart" });
+  await r.hook({ transcript_path: "/test/transcript.jsonl", session_id: "new", hook_event_name: "SessionStart" });
 });
 test("Claude installer preserves existing settings and other projects on repeat/disconnect", async (t) => {
   const root = await gitProject(t),
@@ -218,13 +265,13 @@ test("offline disconnect disables locally and reports pending roster cleanup", a
     log: () => {},
   });
   const r = new Runtime(file, { github: gh });
-  await r.hook({ session_id: "one", hook_event_name: "SessionStart" });
+  await r.hook({ transcript_path: "/test/transcript.jsonl", session_id: "one", hook_event_name: "SessionStart" });
   gh.offline = true;
   const output = [];
   await disconnect({ cwd: root, github: gh, log: (x) => output.push(x) });
   assert(output.some((x) => x.includes("cleanup is pending")));
   await assert.rejects(
-    r.hook({ session_id: "one", hook_event_name: "SessionStart" }),
+    r.hook({ transcript_path: "/test/transcript.jsonl", session_id: "one", hook_event_name: "SessionStart" }),
     /disconnected/,
   );
 });
@@ -296,4 +343,60 @@ test("an interrupted package-path upgrade can resume without overwriting other s
   assert.equal((await status({ cwd: root }))[0].configured, true);
   await disconnect({ cwd: root, github: gh, log: () => {} });
   assert.equal((await status({ cwd: root }))[0].configured, false);
+});
+
+test("recovering an interrupted upgrade preserves remotely retired chats and cursors", async (t) => {
+  const root = await gitProject(t), dir = await temporary(t);
+  process.env.PATCHWORK_HOME = dir;
+  t.after(() => delete process.env.PATCHWORK_HOME);
+  const gh = new FakeGitHub(), params = {
+    cwd: root, client: "codex", repo: gh.repo, github: gh, create: true, log: () => {},
+  };
+  const { file } = await connect(params);
+  let now = Date.now();
+  const runtime = new Runtime(file, { github: gh, clock: () => now });
+  const input = { session_id: "retired", hook_event_name: "SessionStart", transcript_path: "/test/transcript.jsonl" };
+  await runtime.hook(input);
+  const before = await readJSON(stateFile(file)), [chat] = Object.values(before.chats);
+  await disconnect({ repo: gh.repo, agent: chat.id, github: gh, log: () => {} });
+  // A crash after the install marker must not act like a project disconnect.
+  await write(disabledFile(file), "installing\n");
+  const c = await readJSON(file);
+  await writeJSON(file, { ...c, installing: true, previousServer: c.server, previousHooks: c.ownedHooks });
+  await connect(params);
+  assert.deepEqual(await readJSON(stateFile(file)), before);
+  now += 61_000;
+  await assert.rejects(runtime.hook(input), /retired/);
+  assert.equal((await status({ repo: gh.repo, github: gh })).agents[0].active, false);
+  // Explicit user-selected reconnection still works.
+  await connect({ ...params, agent: chat.id });
+  await runtime.hook(input);
+  assert.equal((await status({ repo: gh.repo, github: gh })).agents[0].active, true);
+});
+
+test("an interrupted explicit project reconnect still resumes its disconnected chats", async (t) => {
+  const root = await gitProject(t), dir = await temporary(t);
+  process.env.PATCHWORK_HOME = dir;
+  t.after(() => delete process.env.PATCHWORK_HOME);
+  const gh = new FakeGitHub(), params = {
+    cwd: root, client: "codex", repo: gh.repo, github: gh, create: true, log: () => {},
+  };
+  const { file } = await connect(params);
+  const runtime = new Runtime(file, { github: gh });
+  const input = { session_id: "saved", hook_event_name: "SessionStart", transcript_path: "/test/transcript.jsonl" };
+  await runtime.hook(input);
+  const [chat] = Object.values((await readJSON(stateFile(file))).chats);
+  await disconnect({ cwd: root, client: "codex", github: gh, log: () => {} });
+  const c = await readJSON(file);
+  // Reconnect publishes its intent before modifying config or session state.
+  await write(disabledFile(file), "installing\n");
+  await writeJSON(file, { ...c, enabled: true, installing: true, resumeChats: true, previousServer: c.server, previousHooks: c.ownedHooks });
+  await connect(params);
+  const [resumed] = Object.values((await readJSON(stateFile(file))).chats);
+  assert.equal(resumed.id, chat.id);
+  assert.equal(resumed.chat_key, chat.chat_key);
+  assert.deepEqual(resumed.seen, chat.seen);
+  assert.equal((await readJSON(file)).resumeChats, undefined);
+  await runtime.hook(input);
+  assert.equal((await status({ repo: gh.repo, github: gh })).agents[0].active, true);
 });
