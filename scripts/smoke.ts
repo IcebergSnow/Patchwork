@@ -29,7 +29,7 @@ await client.connect(new StreamableHTTPClientTransport(new URL('/mcp',base),{req
 try {
   await peer.connect(new StreamableHTTPClientTransport(new URL('/mcp',base),{requestInit:{headers:{Authorization:`Bearer ${peerConnection.body.token}`}}}));
   const tools=await client.listTools();
-  assert.deepEqual(tools.tools.map(t=>t.name).sort(),['check_board','post_message','read_messages','resolve_request']);
+  assert.deepEqual(tools.tools.map(t=>t.name).sort(),['acknowledge_request','check_board','post_message','read_messages','resolve_request']);
   assert.ok(!('recipientId' in tools.tools.find(t=>t.name==='post_message')!.inputSchema.properties!));
   assert.ok(!('relevant_only' in tools.tools.find(t=>t.name==='read_messages')!.inputSchema.properties!));
   const call=async(name:string,args:Record<string,unknown>,who=client)=>{
@@ -56,6 +56,24 @@ try {
   await call('post_message',{body:'The endpoint is available.',kind:'message',replyTo:posted.id});
   const stillOpen=await call('read_messages',{open_only:true});
   assert.equal(stillOpen.messages[0].status,'open','A reply must not resolve a request');
+  assert.ok(stillOpen.messages[0].acknowledgments.every((a:any)=>a.response===null));
+  const first=await call('acknowledge_request',{request_id:posted.id,response:'cannot_handle'});
+  assert.equal(first.needsHumanIntervention,false,'An unanswered agent is not a decline');
+  const flagged=await call('acknowledge_request',{request_id:posted.id,response:'cannot_handle'},peer);
+  assert.equal(flagged.needsHumanIntervention,true);assert.equal(flagged.status,'open');
+  const intervention=await request('/api/board?filter=intervention','GET',undefined,member);
+  assert.equal(intervention.body.needsHumanIntervention,1);assert.equal(intervention.body.messages[0].id,posted.id);
+  const spoofed=await client.callTool({name:'acknowledge_request',arguments:{request_id:posted.id,response:'can_handle',agent_id:peerConnection.body.id}});
+  assert.ok(spoofed.isError);
+  for(const who of [client,peer]) {
+    const responses=await call('check_board',{session_id:'smoke-session',hook_event_name:'UserPromptSubmit'},who);
+    assert.equal(responses.hookSpecificOutput.additionalContext.match(/Request response: Cannot handle/g)?.length,2);
+    assert.deepEqual(await call('check_board',{session_id:'smoke-session',hook_event_name:'UserPromptSubmit'},who),{});
+  }
+  await call('acknowledge_request',{request_id:posted.id,response:'need_clarification'},peer);
+  assert.equal((await request('/api/board?filter=intervention','GET',undefined,member)).body.needsHumanIntervention,0);
+  const accepted=await call('acknowledge_request',{request_id:posted.id,response:'can_handle'},peer);
+  assert.equal(accepted.status,'open');
   await call('resolve_request',{request_id:posted.id},peer);
   const feed=await call('read_messages',{after_id:0,limit:100});
   assert.ok(feed.messages.length>=3);assert.equal(feed.openRequests.length,0);
@@ -83,5 +101,5 @@ try {
   const revoked=await fetch(new URL('/mcp',base),{method:'POST',headers:{Authorization:`Bearer ${agent}`,'Content-Type':'application/json'},body:'{}'});
   assert.equal(revoked.status,401);
   await request(`/api/agents/${peerConnection.body.id}`,'DELETE',undefined,member);
-  console.log('HTTP + MCP smoke passed: room setup, all 4 board/hook tools, shared delivery to two agents, explicit resolution, instructions, origin checks, input limits, and revocation.');
+  console.log('HTTP + MCP smoke passed: all 5 board/hook tools, per-agent responses, intervention filter, shared delivery, explicit resolution, instructions, origin checks, input limits, and revocation.');
 }finally{await Promise.all([client.close(),peer.close()]);}

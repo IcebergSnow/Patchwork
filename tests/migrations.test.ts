@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { database } from './database';
-import { authenticate, createAgent, createRoom, postMessage, readMessages, snapshot } from '../src/domain';
+import { authenticate, createAgent, createRoom, postMessage, readMessages, snapshot, acknowledgeRequest } from '../src/domain';
 
 test('upgrade preserves rooms, credentials, threads, categories, scopes, and history',async()=>{
   const {db,sqlite}=database(2);
@@ -19,6 +19,7 @@ test('upgrade preserves rooms, credentials, threads, categories, scopes, and his
   const preserved=['rooms','members','agents','events','integrations'].map(table=>[table,sqlite.prepare(`SELECT * FROM ${table}`).all()] as const);
   sqlite.exec('BEGIN');
   sqlite.exec(readFileSync(new URL('../migrations/0003_simple_board.sql',import.meta.url),'utf8'));
+  sqlite.exec(readFileSync(new URL('../migrations/0004_request_acknowledgments.sql',import.meta.url),'utf8'));
   sqlite.exec('COMMIT');
   assert.deepEqual(sqlite.prepare('PRAGMA foreign_key_check').all(),[]);
   for(const [table,rows] of preserved) assert.deepEqual(sqlite.prepare(`SELECT * FROM ${table}`).all(),rows);
@@ -33,7 +34,28 @@ test('upgrade preserves rooms, credentials, threads, categories, scopes, and his
   assert.ok(feed.messages.slice(1).every(row=>row.reply_to===10));
   assert.ok(!('claimed_by' in feed.messages[0]));
   assert.ok(feed.messages.every(message=>!('recipient_id' in message)));
-  assert.equal((await snapshot(db,owner,0,true)).openRequests,1);
+  assert.equal((await snapshot(db,owner,0,'open')).openRequests,1);
   assert.equal((await postMessage(db,owner,{body:'New message'})).id,100);
   assert.throws(()=>sqlite.prepare("UPDATE messages SET status = 'claimed' WHERE id = 10").run(),/CHECK constraint/);
+});
+
+test('acknowledgment migration leaves messages, instructions, and hook cursors intact',async()=>{
+  const {db,sqlite}=database(3);
+  const credentials=await createRoom(db,{name:'Existing board',memberName:'Owner'});
+  const owner=await authenticate(db,`Bearer ${credentials.token}`,'member');
+  const connection=await createAgent(db,owner,{name:'Existing agent'});
+  const request=await postMessage(db,owner,{body:'Keep this open',kind:'request'});
+  sqlite.prepare('UPDATE rooms SET instructions = ?, instructions_version = 3').run('Keep testing.');
+  sqlite.prepare('INSERT INTO hook_sessions (agent_id,session_hash,cursor,last_checked,last_instructions,instructions_version,context_hash,lease_id) VALUES (?,?,?,?,?,?,?,?)')
+    .run(connection.id,'existing-session',request.id,1000,900,3,'old-context','old-lease');
+  const tables=['rooms','members','agents','messages','hook_sessions'];
+  const before=tables.map(table=>sqlite.prepare(`SELECT * FROM ${table}`).all());
+  sqlite.exec(readFileSync(new URL('../migrations/0004_request_acknowledgments.sql',import.meta.url),'utf8'));
+  tables.forEach((table,i)=>assert.deepEqual(sqlite.prepare(`SELECT * FROM ${table}`).all(),before[i]));
+  const old=(await readMessages(db,owner)).messages[0];
+  assert.equal(old.acknowledgments![0].response,null);assert.equal(old.needsHumanIntervention,false);
+  const actor=await authenticate(db,`Bearer ${connection.token}`,'agent');
+  await acknowledgeRequest(db,actor,{request_id:request.id,response:'cannot_handle'});
+  assert.equal((await snapshot(db,owner)).needsHumanIntervention,1);
+  assert.deepEqual(sqlite.prepare('PRAGMA foreign_key_check').all(),[]);
 });

@@ -48,7 +48,7 @@ test('request changes are atomic, idempotent, and visible after a message cursor
   assert.equal(updates.messages[0].reply_to,request.id);
   assert.match(updates.messages[0].body,/resolved/);
   await requestAction(db,owner,request.id,'reopen');
-  assert.equal((await snapshot(db,owner,0,true)).openRequests,1);
+  assert.equal((await snapshot(db,owner,0,'open')).openRequests,1);
 });
 
 test('any participant in the room can explicitly resolve and reopen a request',async()=>{
@@ -112,7 +112,7 @@ test('historical recipient metadata is preserved but never exposed, inherited, o
   const reply=await postMessage(db,agent,{body:'Here is the result',replyTo:root.id});
   const nested=await postMessage(db,owner,{body:'Thanks for the context',replyTo:reply.id});
   assert.equal(nested.reply_to,root.id);
-  assert.equal((await snapshot(db,owner,0,true)).openRequests,1,'Replies never resolve requests');
+  assert.equal((await snapshot(db,owner,0,'open')).openRequests,1,'Replies never resolve requests');
   for(const actor of [owner,agent]) {
     const feed=await readMessages(db,actor);
     assert.ok(feed.messages.every(m=>!('recipient_id' in m)));
@@ -163,7 +163,7 @@ test('message cursors and older threads retain replies and pending requests',asy
   assert.equal(recent.messages.filter(m=>m.reply_to===null).length,30);
   const older=await snapshot(db,owner,recent.nextBefore!);
   assert.ok(older.messages.some(m=>m.reply_to===first.id));
-  const open=await snapshot(db,owner,0,true);
+  const open=await snapshot(db,owner,0,'open');
   assert.equal(open.openRequests,1);
   assert.equal(open.messages.find(m=>m.id===first.id)!.body,'Old unresolved request');
   const firstPage=await readMessages(db,owner,0,10),secondPage=await readMessages(db,owner,firstPage.nextCursor,10);

@@ -59,6 +59,12 @@ code, pre { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; fo
 .instructions-box { background:var(--surface); border:1px solid var(--line); padding:18px; border-radius:10px; }
 .instructions-box summary { font-weight:600; }
 .connection-activity { display:grid; gap:3px; }
+.request-responses { margin-top:14px; font-size:12px; }
+.request-responses ul { list-style:none; padding:0; margin:10px 0; }
+.request-responses li { display:flex; justify-content:space-between; flex-wrap:wrap; gap:6px 12px; margin:7px 0; overflow-wrap:anywhere; }
+.request-responses .instruction { font-size:12px; }
+.response.can_handle { color:var(--green); }.response.cannot_handle { color:var(--red); }.response.need_clarification { color:var(--amber); }.response.unanswered { color:var(--muted); }
+.intervention { margin-top:14px; padding:10px 12px; border-radius:6px; background:var(--amber-soft); color:var(--amber); font-size:12px; }
 .instructions-box textarea { min-height:170px; font-size:13px; }
 .composer select { max-width:100%; }
 .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }

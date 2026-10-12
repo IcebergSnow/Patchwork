@@ -6,7 +6,7 @@ type Session = { roomId: string; roomName: string; name: string; memberId: strin
 type Board = {
   room: ReturnType<typeof publicRoom>; me: {id:string;name:string;kind:string}; agents: Agent[]; members: {id:string;name:string}[];
   messages: Message[];
-  openRequests: number; nextBefore: number | null; serverTime: string;
+  openRequests: number; needsHumanIntervention: number; nextBefore: number | null; serverTime: string;
 };
 const app = document.querySelector<HTMLDivElement>('#app')!;
 const toastElement = document.querySelector<HTMLDivElement>('#toast')!;
@@ -19,6 +19,7 @@ let board: Board | null = null, tab = 'board', filter = 'all', landing = 'create
 let messages: Message[] = [], nextBefore: number | null = null, selectedAgent = '', replyTo = 0, offline = '', syncing = false;
 let pagesLoaded = 1;
 const expandedInstructions = new Set<string>();
+const expandedResponses = new Set<string>();
 let keys = load<Record<string,string>>('patchwork.agentKeys', {}), needsKey = true, toastTimer = 0;
 const drafts = new Map<string, Record<string, FormDataEntryValue>>();
 function draftKey(form: HTMLFormElement) { return `${form.dataset.room}:${form.dataset.form}:${form.dataset.id??''}`; }
@@ -94,19 +95,28 @@ function instructionsView() {
     ${owner?'<div class="row"><button class="button tiny" type="submit">Save instructions</button>'+button('Reload saved','reload-instructions','','tiny quiet')+'</div>':'<p class="small muted">The room owner can edit these instructions.</p>'}</form>
     <p class="instruction">Shared with every agent through its hooks. Reminded at work checkpoints, roughly every five minutes while active. The agent decides how to carry them out.</p></details>`;
 }
+function responsesView(root: Message) {
+  if (!root.acknowledgments) return '';
+  const active = root.acknowledgments.filter(a=>a.active), responded = active.filter(a=>a.response).length;
+  const labels = {can_handle:'Can handle', cannot_handle:'Cannot handle', need_clarification:'Need clarification'};
+  return `<details class="request-responses" data-responses="${root.id}" ${expandedResponses.has(`${session!.roomId}:${root.id}`)?'open':''}><summary>Agent responses <span class="muted">· ${responded} of ${active.length} responded</span></summary>
+    ${root.acknowledgments.length?`<ul>${root.acknowledgments.map(a=>`<li><span>${e(a.agent_name)}${a.active?'':' <span class="muted">(revoked)</span>'}</span><span class="response ${a.response??'unanswered'}">${a.response?labels[a.response]:'Not responded'}</span></li>`).join('')}</ul>`:'<p class="instruction">No agent connections yet.</p>'}
+    <p class="instruction">Responses do not assign work or resolve the request. All connections that haven’t been revoked count, including idle agents.</p></details>`;
+}
 function thread(root: Message) {
   const replies = messages.filter(m=>m.reply_to===root.id).sort((a,b)=>a.id-b.id);
   return `<article class="thread" id="message-${root.id}"><div class="byline"><strong>${e(root.author_name)}</strong><span class="badge">${root.kind==='request'?'Request':'Message'} #${root.id}</span>${root.status?`<span class="badge ${e(root.status)}">${root.status==='open'?'Open':'Resolved'}</span>`:''}<time datetime="${e(root.created_at)}">${e(timestamp(root.created_at))}</time></div><p class="body">${e(root.body)}</p>
+  ${root.needsHumanIntervention?'<p class="intervention"><strong>Needs Human Intervention</strong><br>Every active agent explicitly responded Cannot handle.</p>':''}${responsesView(root)}
   ${replies.length?`<div class="replies">${replies.map(reply=>`<div class="reply"><div class="byline"><strong>${e(reply.author_name)}</strong><time datetime="${e(reply.created_at)}">${e(timestamp(reply.created_at))}</time></div><p class="body">${e(reply.body)}</p></div>`).join('')}</div>`:''}
   <div class="thread-actions">${button('Reply','reply',`data-id="${root.id}"`,'tiny quiet')}${root.status?button(root.status==='resolved'?'Reopen':'Resolve',root.status==='resolved'?'reopen':'resolve',`data-id="${root.id}"`,'tiny'):''}</div>
   ${replyTo===root.id?`<form class="reply-form" data-form="reply" data-id="${root.id}"><label><span class="small">Reply to #${root.id}</span><textarea name="body" required maxlength="8000" placeholder="Add context or share an outcome…"></textarea></label><div class="row"><button class="button primary tiny" type="submit">Post reply</button>${button('Cancel','cancel-reply','','tiny quiet')}</div></form>`:''}</article>`;
 }
 function feed() {
-  const roots = messages.filter(m=>m.reply_to===null && (filter==='all'||m.kind==='request'&&m.status==='open')).sort((a,b)=>b.id-a.id);
-  return `${roots.length?roots.map(thread).join(''):`<div class="empty"><h3>${filter==='open'?'No open requests':'Start the conversation'}</h3><p>${filter==='open'?'Requests will appear here until they’re resolved.':'Post a question or let the team know what you’re building.'}</p></div>`}${nextBefore?button('Load older threads','older','','quiet'):''}`;
+  const roots = messages.filter(m=>m.reply_to===null && (filter==='all'||filter==='intervention'&&m.needsHumanIntervention||filter==='open'&&m.kind==='request'&&m.status==='open')).sort((a,b)=>b.id-a.id);
+  return `${roots.length?roots.map(thread).join(''):`<div class="empty"><h3>${filter==='intervention'?'No requests need intervention':filter==='open'?'No open requests':'Start the conversation'}</h3><p>${filter==='intervention'?'Requests appear here only when every active agent explicitly declines.':filter==='open'?'Requests will appear here until they’re resolved.':'Post a question or let the team know what you’re building.'}</p></div>`}${nextBefore?button('Load older threads','older','','quiet'):''}`;
 }
 function boardView() {
-  return `<div class="layout"><section><div class="row spread"><h2>Bulletin board</h2><div class="row filters">${button('All messages','filter-all',`aria-pressed="${filter==='all'}"`,'tiny quiet')}${button(`Unresolved <span id="open-count">${board!.openRequests}</span>`,'filter-open',`aria-pressed="${filter==='open'}"`,'tiny quiet')}</div></div>
+  return `<div class="layout"><section><div class="row spread"><h2>Bulletin board</h2><div class="row filters">${button('All messages','filter-all',`aria-pressed="${filter==='all'}"`,'tiny quiet')}${button(`Unresolved <span id="open-count">${board!.openRequests}</span>`,'filter-open',`aria-pressed="${filter==='open'}"`,'tiny quiet')}${button(`Needs intervention <span id="intervention-count">${board!.needsHumanIntervention}</span>`,'filter-intervention',`aria-pressed="${filter==='intervention'}"`,'tiny quiet')}</div></div>
   <form class="composer" data-form="post"><label><span>Share something with the team</span><textarea name="body" required maxlength="8000" placeholder="What do you need, or what should the team know?"></textarea></label><div class="row spread"><div class="row"><select name="kind" aria-label="Message type"><option value="message">Message</option><option value="request">Request</option></select></div><button class="button primary" type="submit">Post message</button></div></form><div id="feed">${feed()}</div></section><aside><section class="aside-section" id="agent-list">${agentsView()}</section><section class="instructions-box" id="instructions-box">${instructionsView()}</section></aside></div>`;
 }
 function connectionDetails(agent: Agent) {
@@ -183,6 +193,7 @@ async function refresh(full=false, older=false) {
         document.querySelector('#agent-list')!.innerHTML=agentsView();
         if(!editing) document.querySelector('#instructions-box')!.innerHTML=instructionsView();
         document.querySelector('#open-count')!.textContent=String(data.openRequests);
+        document.querySelector('#intervention-count')!.textContent=String(data.needsHumanIntervention);
         restoreDrafts();
       }
       const selected=data.agents.find(a=>a.id===selectedAgent), connection=document.querySelector('#connection-state');
@@ -208,7 +219,7 @@ app.addEventListener('click', async event=> {
     if(action==='new-room'){page='welcome';render();return;}
     if(action==='back-room'){page='room';await refresh(true);return;}
     if(action==='show-board'||action==='setup'){tab=action==='setup'?'setup':'board';render();return;}
-    if(action.startsWith('filter-')){filter=action.slice(7)==='open'?'open':'all';messages=[];nextBefore=null;pagesLoaded=1;await refresh(true);return;}
+    if(action.startsWith('filter-')){filter=action.slice(7);messages=[];nextBefore=null;pagesLoaded=1;await refresh(true);return;}
     if(action==='reply'||action==='cancel-reply'){replyTo=action==='reply'?Number(id):0;document.querySelector('#feed')!.innerHTML=feed();restoreDrafts();document.querySelector<HTMLTextAreaElement>('.reply-form textarea')?.focus();return;}
     if(action==='refresh'){await refresh(true);return;}
     if(action==='older'){target.disabled=true;await refresh(false,true);return;}
@@ -233,6 +244,10 @@ app.addEventListener('toggle', event=> {
   const details=event.target as HTMLDetailsElement;
   if(details.id==='custom-instructions' && details.isConnected && board) {
     if(details.open) expandedInstructions.add(board.room.id); else expandedInstructions.delete(board.room.id);
+  }
+  if(details.dataset.responses && details.isConnected && board) {
+    const key=`${board.room.id}:${details.dataset.responses}`;
+    if(details.open) expandedResponses.add(key); else expandedResponses.delete(key);
   }
 }, true);
 app.addEventListener('input', event=> {
