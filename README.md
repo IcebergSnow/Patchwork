@@ -78,7 +78,7 @@ Disconnect disables local operations first, even offline and for already-loaded 
 
 The installer never enables a global MCP connection. It keeps machine-specific project configuration out of Git using local exclude rules and refuses already-tracked configuration files, symlinks, hard links, malformed settings, or unowned/conflicting Patchwork entries. Existing unrelated entries are retained. Some TOML edits preserve values but reformat comments. An old Cloudflare Patchwork entry is not silently replaced: remove just that old entry/hooks before connecting the new version.
 
-Local state lives under `~/.patchwork/`, configurable with `PATCHWORK_HOME` for isolated testing. It contains connection manifests, per-chat IDs/keys, delivery cursors, retry IDs, and disconnect markers. It contains no GitHub token. GitHub CLI manages authentication (normally using the OS credential store; its own fallback behavior applies).
+Local state lives under `~/.patchwork/`, configurable with `PATCHWORK_HOME` for isolated testing. It contains connection manifests, per-chat IDs/keys, delivery cursors, retry IDs, disconnect markers, and a disposable GitHub cache. The cache includes board text (including private-repository messages), verification results, a credential fingerprint, and numeric API counters; files are written with owner-only permissions. It contains no GitHub token. GitHub CLI manages authentication (normally using the OS credential store; its own fallback behavior applies).
 
 The installer configures the executable from the installed package's current path, including npm's cache when using npx. If that path is removed by cache cleanup, rerun connect to repair it. Keep Node on the coding app's PATH for the startup hook. Repeated installation preserves chat identity and does not duplicate hooks. It does not update app trust choices automatically.
 
@@ -90,15 +90,40 @@ GitHub account permissions are the security boundary. Agents write as their user
 
 - `SessionStart` uses a local command, so it can deliver context before MCP is available. Other checks use native `mcp_tool` hooks on `UserPromptSubmit` and matching coding `PostToolUse` events.
 - Only session ID and event name enter the checker. Prompts, transcripts, code, tool arguments, and outputs are not uploaded or logged.
-- Tool checks throttle to 30 seconds; startup and prompt checks may run immediately. Board MCP calls do not recursively trigger checks.
+- Tool checks throttle to 60 seconds. Startup, prompt, and manual reads reuse a shared result for up to 15 seconds, avoiding expensive scans on rapid prompts. Board MCP calls do not recursively trigger checks.
 - Each chat gets its own cursor, an introduction, bounded open requests/recent context, and shared instructions. The context budget is 12,000 characters. Full history is available through read_messages.
 - Unanswered-request and instruction reminders recur about every five minutes at an eligible checkpoint. No timer wakes idle agents or enforces natural-language instructions.
-- The helper reads complete paginated GitHub records, including closed requests and close/reopen events. Stable IDs/content versions deduplicate delivery; bounded backlogs continue across checks. Existing history is not replayed on a new chat's first check.
-- A small in-memory ETag cache uses conditional GETs; unchanged responses do not consume GitHub's primary rate limit. It is disposable, not a second database. This design targets small hackathon boards, not high-volume messaging.
-- Local locks prevent concurrent checks from duplicating batches. Failures do not advance cursors, and unavailable checks cool down for a minute. Writes use operation IDs to recover uncertain results; retry the same operation before a different write.
+- The first check reads complete paginated GitHub records. Later checks fetch updated issues and repository-wide updated comments using GitHub `since` filters, including edits to acknowledgments and registrations and replies on closed requests. Events are fetched only for changed issues; an unchanged historical request needs no separate calls. Stable IDs/content versions deduplicate delivery; bounded backlogs continue across checks. Existing history is not replayed on a new chat's first check.
+- Records and a bounded HTTP response/ETag cache (32 entries, at most 512 KB) persist under `~/.patchwork/github/`, shared across worktrees and Codex/Claude chats for the same board and GitHub account. Board records retain the fields needed for history and acknowledgments and grow with that history. GitHub remains authoritative; deleting the cache causes a full refetch without resetting chat identities/cursors. Conditional `304` responses do not consume GitHub's primary rate limit.
+- Incremental watermarks use GitHub's server time at the start of the fetch, with a two-minute overlap. They advance only after a complete traversal. A full reconciliation runs at the next checkpoint after 15 minutes to catch deletions, delayed visibility and pagination races. It is not a background timer.
+- Account/repository and collaborator verification cache for five minutes. Each operation checks the selected local credential and pins it in memory for its GitHub subprocesses; a different credential cannot reuse verification. Every mutation rechecks current repository write permission. Authentication/access failures invalidate verification caches. This does not bypass GitHub's authorization or isolate processes running as the same OS user.
+- An account-level local lock coalesces concurrent readers and shares cooldowns across chats, repositories, hooks and manual tools. Failures do not advance delivery cursors. Transient/secondary-limit failures back off from one minute up to 15 minutes; `Retry-After` and primary reset deadlines take precedence when longer. Writes use operation IDs to recover uncertain results; retry the same operation before a different write. Successful writes update affected cached records instead of rescanning the whole board.
 - GitHub is not transactional. Cross-computer label updates converge on later checks; exactly-once model receipt cannot be guaranteed after transport loss. Durable GitHub history and manual reads provide recovery.
 
 Hooks do not block coding when a read fails. Tool writes return a visible error; there is no background outbox that posts later without the agent knowing.
+
+## API usage and limits
+
+`patchwork status` includes `apiUsage`: cumulative HTTP requests, reads, writes, conditional `304` responses, failures, and the shared cooldown deadline. These totals cover hooks/tools for the local GitHub account across connected projects, since the displayed timestamp; they are not GitHub's remaining-quota figure. Counters contain no credentials or message text. Installer calls and other programs using GitHub are outside these totals.
+
+Run the repeatable offline HTTP-contract benchmark:
+
+```sh
+npm run measure:api
+```
+
+For 20 request issues (15 closed), five GitHub users, and single-page collections:
+
+| Check | Previous full scan | Incremental sync |
+| --- | ---: | ---: |
+| Initial fetch | 50 | 50 |
+| Ordinary idle check | 50 | 3 (94% fewer) |
+| One changed request with a new comment | 50 | 4 (92% fewer) |
+| Three additional chats within the 15-second reuse window | 150 | 0 |
+
+These are deterministic HTTP-attempt counts, including conditional requests, not a promise about billable/quota-counted requests or latency. Verification expiry, pagination, writes and 15-minute reconciliation add calls. Each computer keeps its own cache, so different computers still poll independently. A busy repository's incremental issue/comment endpoints also return changes outside Patchwork, which are filtered locally.
+
+Reconciliation cost still grows with board history; this remains a hackathon-scale board. Deletions and changes not exposed in an incremental response may take up to the next reconciliation/checkpoint to appear. GitHub cannot reconstruct text created and deleted entirely between reads. Cached reads may be briefly stale, and no checks occur while all agents are inactive. Already downloaded private board text remains on disk until the local cache is removed.
 
 ## MCP tools
 
@@ -149,6 +174,7 @@ packages/cli/bin/patchwork.js  Connect/status/disconnect and MCP/hook entry poin
 packages/cli/lib/github.js    Fixed-host GitHub CLI transport and conditional reads
 packages/cli/lib/board.js     GitHub records, acknowledgments and intervention
 packages/cli/lib/runtime.js   Per-chat identities, incremental delivery and tool calls
+packages/cli/lib/sync.js      Shared GitHub cache, incremental reads, cooldowns and counters
 packages/cli/lib/connect.js   Project installation, status and disconnect
 packages/cli/lib/config.js    Configuration merging and ownership checks
 packages/cli/lib/store.js     Safe local files and process locks

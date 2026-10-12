@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { GitHub } from "./github.js";
-import { snapshot, register, reconcileIntervention, perform } from "./board.js";
+import { register, reconcileIntervention, perform } from "./board.js";
+import { withBoard, POLL_INTERVAL, PROMPT_INTERVAL } from "./sync.js";
 import {
   digest,
   read,
@@ -11,7 +12,7 @@ import {
 } from "./store.js";
 import { AGENT_INSTRUCTIONS } from "./instructions.js";
 
-export const CHECK_INTERVAL = 30_000,
+export const CHECK_INTERVAL = POLL_INTERVAL,
   REMINDER_INTERVAL = 300_000;
 const LIMIT = 12_000;
 export const disabledFile = (file, id) =>
@@ -51,10 +52,8 @@ export class Runtime {
     this.github = github;
     this.clock = clock;
   }
-  async authenticated(c) {
-    const gh = (this.github ||= new GitHub(c.repo));
-    await gh.verify(c);
-    return gh;
+  client(c) {
+    return (this.github ||= new GitHub(c.repo));
   }
   async hook(input) {
     if (
@@ -98,28 +97,57 @@ export class Runtime {
         now - chat.lastCheck < CHECK_INTERVAL
       )
         return {};
-      let gh;
       try {
-        gh = await this.authenticated(c);
-        if (!chat.registered) {
-          await register(
-            gh,
-            c.board,
-            chat,
-            true,
-            chat.registrationOperation,
-            () => guard(this.file, chat.id),
-          );
-          chat.registered = true;
-          chat.retireOperation = null;
-          await writeJSON(stateFile(this.file), store);
-        }
-        const state = await snapshot(gh, c.board);
-        const current = state.agents.find((a) => a.agent_id === chat.id);
-        if (!current?.active)
-          throw new Error(
-            "This chat was retired on GitHub. Reconnect it explicitly.",
-          );
+        const gh = this.client(c);
+        const { state, labelWarning } = await withBoard(
+          c,
+          gh,
+          async (sync) => {
+            await sync.poll(
+              input.hook_event_name === "PostToolUse"
+                ? POLL_INTERVAL
+                : PROMPT_INTERVAL,
+            );
+            if (!chat.registered) {
+              const registration = await register(
+                gh,
+                c.board,
+                chat,
+                true,
+                chat.registrationOperation,
+                async () => {
+                  await guard(this.file, chat.id);
+                  await sync.authorize();
+                },
+              );
+              await sync.accept(registration);
+              chat.registered = true;
+              chat.retireOperation = null;
+              await writeJSON(stateFile(this.file), store);
+            }
+            const state = await sync.view();
+            if (!state.agents.some((a) => a.agent_id === chat.id && a.active))
+              throw new Error(
+                "This chat was retired on GitHub. Reconnect it explicitly.",
+              );
+            let labelWarning = false;
+            try {
+              await reconcileIntervention(
+                gh,
+                state,
+                async () => {
+                  await guard(this.file, chat.id);
+                  await sync.authorize();
+                },
+                (request) => sync.labels(request),
+              );
+            } catch {
+              labelWarning = true;
+            }
+            return { state, labelWarning };
+          },
+          this.clock,
+        );
         const initial = !chat.initialized;
         const hash = digest(
           JSON.stringify([
@@ -205,16 +233,9 @@ export class Runtime {
             context +=
               "\nMore updates remain. The next check continues delivery; read_messages can read them now.\n";
         }
-        // Labels are a best-effort projection, never authoritative state. A
-        // failure to refresh a label must not discard durable board messages.
-        try {
-          await reconcileIntervention(gh, state, () =>
-            guard(this.file, chat.id),
-          );
-        } catch {
+        if (labelWarning)
           context +=
             "\nCould not refresh GitHub intervention labels; responses above remain authoritative.\n";
-        }
         await guard(this.file, chat.id);
         chat.initialized = true;
         chat.contextHash = hash;
@@ -257,101 +278,124 @@ export class Runtime {
           "Use the chat_key supplied by this chat's Patchwork hook. Start/reload the chat if no key has arrived.",
         );
       await guard(this.file, chat.id);
-      const gh = await this.authenticated(c),
-        state = await snapshot(gh, c.board);
-      if (!state.agents.some((a) => a.agent_id === chat.id && a.active))
-        throw new Error(
-          "This chat is no longer registered. Reconnect it explicitly.",
-        );
-      if (name === "read_messages") {
-        let cursor = 0;
-        if (input.cursor) {
-          try {
-            const v = JSON.parse(
-              Buffer.from(input.cursor, "base64url").toString(),
+      const gh = this.client(c);
+      return withBoard(
+        c,
+        gh,
+        async (sync) => {
+          await sync.poll(PROMPT_INTERVAL);
+          const state = await sync.view();
+          if (!state.agents.some((a) => a.agent_id === chat.id && a.active))
+            throw new Error(
+              "This chat is no longer registered. Reconnect it explicitly.",
             );
-            if (
-              v.board !== c.board ||
-              v.open !== !!input.open_only ||
-              !Number.isSafeInteger(v.offset) ||
-              v.offset < 0
-            )
-              throw 0;
-            cursor = v.offset;
-          } catch {
-            throw new Error("Invalid cursor for this board/filter.");
+          if (name === "read_messages") {
+            let cursor = 0;
+            if (input.cursor) {
+              try {
+                const v = JSON.parse(
+                  Buffer.from(input.cursor, "base64url").toString(),
+                );
+                if (
+                  v.board !== c.board ||
+                  v.open !== !!input.open_only ||
+                  !Number.isSafeInteger(v.offset) ||
+                  v.offset < 0
+                )
+                  throw 0;
+                cursor = v.offset;
+              } catch {
+                throw new Error("Invalid cursor for this board/filter.");
+              }
+            }
+            const items = input.open_only
+              ? state.requests.filter((r) => r.state === "open")
+              : state.events;
+            const batch = items.slice(cursor, cursor + 30);
+            return {
+              agents: state.agents,
+              instructions: state.instructions,
+              messages: batch,
+              requests: input.open_only
+                ? batch
+                : state.requests.filter((r) => r.state === "open"),
+              hasMore: cursor + 30 < items.length,
+              nextCursor:
+                cursor + 30 < items.length
+                  ? Buffer.from(
+                      JSON.stringify({
+                        board: c.board,
+                        open: !!input.open_only,
+                        offset: cursor + 30,
+                      }),
+                    ).toString("base64url")
+                  : null,
+            };
           }
-        }
-        const items = input.open_only
-          ? state.requests.filter((r) => r.state === "open")
-          : state.events;
-        const batch = items.slice(cursor, cursor + 30);
-        return {
-          agents: state.agents,
-          instructions: state.instructions,
-          messages: batch,
-          requests: input.open_only
-            ? batch
-            : state.requests.filter((r) => r.state === "open"),
-          hasMore: cursor + 30 < items.length,
-          nextCursor:
-            cursor + 30 < items.length
-              ? Buffer.from(
-                  JSON.stringify({
-                    board: c.board,
-                    open: !!input.open_only,
-                    offset: cursor + 30,
-                  }),
-                ).toString("base64url")
-              : null,
-        };
-      }
-      const actions = {
-        post_message: "post",
-        acknowledge_request: "ack",
-        resolve_request: "resolve",
-      };
-      if (!actions[name]) throw new Error("Unknown board tool.");
-      const data = { ...input, chat_key: undefined, action: actions[name] };
-      const fingerprint = digest(JSON.stringify(data));
-      if (chat.pending && chat.pending.fingerprint !== fingerprint)
-        throw new Error(
-          "An earlier write has an uncertain result. Retry that exact operation first to avoid duplicate or reordered posts.",
-        );
-      chat.pending ??= { fingerprint, id: randomUUID() };
-      await writeJSON(stateFile(this.file), store);
-      let result;
-      try {
-        result = await perform(gh, c, chat, data, chat.pending.id, () =>
-          guard(this.file, chat.id),
-        );
-      } catch (e) {
-        // Validation and definite rejections can safely be corrected. Unknown
-        // network/5xx results retain the same operation ID for a safe retry.
-        if (!("status" in e) || (e.status >= 400 && e.status < 500)) {
+          const actions = {
+            post_message: "post",
+            acknowledge_request: "ack",
+            resolve_request: "resolve",
+          };
+          if (!actions[name]) throw new Error("Unknown board tool.");
+          const data = { ...input, chat_key: undefined, action: actions[name] };
+          const fingerprint = digest(JSON.stringify(data));
+          if (chat.pending && chat.pending.fingerprint !== fingerprint)
+            throw new Error(
+              "An earlier write has an uncertain result. Retry that exact operation first to avoid duplicate or reordered posts.",
+            );
+          chat.pending ??= { fingerprint, id: randomUUID() };
+          await writeJSON(stateFile(this.file), store);
+          let result;
+          try {
+            result = await perform(
+              gh,
+              c,
+              chat,
+              data,
+              chat.pending.id,
+              async () => {
+                await guard(this.file, chat.id);
+                await sync.authorize();
+              },
+            );
+          } catch (e) {
+            // Validation and definite rejections can safely be corrected. Unknown
+            // network/5xx results retain the same operation ID for a safe retry.
+            if (!("status" in e) || (e.status >= 400 && e.status < 500)) {
+              chat.pending = null;
+              await writeJSON(stateFile(this.file), store);
+            }
+            throw e;
+          }
           chat.pending = null;
           await writeJSON(stateFile(this.file), store);
-        }
-        throw e;
-      }
-      chat.pending = null;
-      await writeJSON(stateFile(this.file), store);
-      let labelWarning;
-      try {
-        await reconcileIntervention(gh, await snapshot(gh, c.board), () =>
-          guard(this.file, chat.id),
-        );
-      } catch {
-        labelWarning =
-          "Post saved; intervention labels will refresh on a later check.";
-      }
-      return {
-        id: result.id,
-        number: result.number,
-        url: result.html_url,
-        unchanged: result.unchanged,
-        ...(labelWarning ? { warning: labelWarning } : {}),
-      };
+          let labelWarning;
+          try {
+            await sync.accept(result);
+            await reconcileIntervention(
+              gh,
+              await sync.view(),
+              async () => {
+                await guard(this.file, chat.id);
+                await sync.authorize();
+              },
+              (request) => sync.labels(request),
+            );
+          } catch {
+            labelWarning =
+              "Post saved; intervention labels will refresh on a later check.";
+          }
+          return {
+            id: result.id,
+            number: result.number,
+            url: result.html_url,
+            unchanged: result.unchanged,
+            ...(labelWarning ? { warning: labelWarning } : {}),
+          };
+        },
+        this.clock,
+      );
     });
   }
 }

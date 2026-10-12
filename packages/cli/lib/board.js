@@ -112,10 +112,9 @@ export async function assertRequest(gh, number, boardNumber) {
   return issue;
 }
 
-// The board is the source of truth. A complete small-board snapshot avoids
-// maintaining another database or relying on GitHub search indexing delays.
-export async function snapshot(gh, boardNumber) {
-  const board = await gh.api("GET", `/issues/${boardNumber}`);
+// Raw records are disposable GitHub cache data. Projection below retains the
+// existing board semantics independently of how those records were fetched.
+export function assertBoard(board) {
   if (
     board.pull_request ||
     board.state !== "open" ||
@@ -123,15 +122,46 @@ export async function snapshot(gh, boardNumber) {
     !labels(board).includes(BOARD_LABEL)
   )
     throw new Error("The connected board is missing or closed.");
-  const [comments, issues] = await Promise.all([
-    gh.list(`/issues/${boardNumber}/comments`),
-    gh.list(`/issues?state=all&labels=${encodeURIComponent(REQUEST_LABEL)}`),
-  ]);
+}
+export async function fullRecords(gh, boardNumber, board) {
+  board ||= await gh.api("GET", `/issues/${boardNumber}`);
+  assertBoard(board);
+  const comments = await gh.list(`/issues/${boardNumber}/comments`);
+  const issues = await gh.list(
+    `/issues?state=all&labels=${encodeURIComponent(REQUEST_LABEL)}&sort=created&direction=asc`,
+  );
+  const records = { board, comments, requests: {} };
+  for (const issue of issues.filter((i) => isRequest(i, boardNumber))) {
+    records.requests[issue.number] = {
+      issue,
+      comments: await gh.list(`/issues/${issue.number}/comments`),
+      events: await gh.list(`/issues/${issue.number}/events`),
+    };
+  }
+  return records;
+}
+export async function snapshot(gh, boardNumber) {
+  return project(gh, await fullRecords(gh, boardNumber));
+}
+export async function project(
+  gh,
+  records,
+  permissionCache = {},
+  now = Date.now(),
+) {
+  const { board, comments } = records,
+    boardNumber = board.number;
   const roster = new Map(),
     permissions = new Map();
   async function writer(user) {
     if (!user?.login) return false;
     if (!permissions.has(user.id)) {
+      const key = `${user.id}:${user.login}`,
+        cached = permissionCache[key];
+      if (cached && now >= cached.at && now - cached.at < 300_000) {
+        permissions.set(user.id, cached.allowed);
+        return cached.allowed;
+      }
       let p;
       try {
         p = await gh.api(
@@ -140,6 +170,7 @@ export async function snapshot(gh, boardNumber) {
         );
       } catch (e) {
         if (e.status !== 404) throw e;
+        permissionCache[key] = { at: now, allowed: false };
         permissions.set(user.id, false);
         return false;
       }
@@ -148,6 +179,7 @@ export async function snapshot(gh, boardNumber) {
         !!p.user?.permissions?.push ||
           ["admin", "write", "maintain"].includes(p.permission),
       );
+      permissionCache[key] = { at: now, allowed: permissions.get(user.id) };
     }
     return permissions.get(user.id);
   }
@@ -170,13 +202,13 @@ export async function snapshot(gh, boardNumber) {
   }
   const events = comments.map((c) => commentEvent(c, boardNumber));
   const requests = [];
-  for (const i of issues
-    .filter((i) => isRequest(i, boardNumber))
-    .sort((a, b) => a.number - b.number)) {
-    const [replies, transitions] = await Promise.all([
-      gh.list(`/issues/${i.number}/comments`),
-      gh.list(`/issues/${i.number}/events`),
-    ]);
+  for (const {
+    issue: i,
+    comments: replies,
+    events: transitions,
+  } of Object.values(records.requests).sort(
+    (a, b) => a.issue.number - b.issue.number,
+  )) {
     const acknowledgments = new Map();
     for (const c of [...replies].sort((a, b) => a.id - b.id)) {
       const m = metadata(c.body),
@@ -262,7 +294,12 @@ function commentEvent(c, thread) {
     url: c.html_url,
   };
 }
-export async function reconcileIntervention(gh, state, guard = async () => {}) {
+export async function reconcileIntervention(
+  gh,
+  state,
+  guard = async () => {},
+  changed = () => {},
+) {
   for (const r of state.requests) {
     const has = r.labels.includes(INTERVENTION_LABEL);
     if (has === r.needsHumanIntervention) continue;
@@ -280,6 +317,9 @@ export async function reconcileIntervention(gh, state, guard = async () => {}) {
       } catch (e) {
         if (e.status !== 404) throw e;
       }
+    r.labels = r.labels.filter((name) => name !== INTERVENTION_LABEL);
+    if (r.needsHumanIntervention) r.labels.push(INTERVENTION_LABEL);
+    changed(r);
   }
 }
 export async function register(
@@ -313,8 +353,10 @@ export async function commentOnce(
   body,
   meta,
   guard = async () => {},
+  knownComments,
 ) {
-  const comments = await gh.list(`/issues/${issue}/comments`);
+  const comments =
+    knownComments || (await gh.list(`/issues/${issue}/comments`));
   const old = comments.find(
     (c) =>
       metadata(c.body)?.operation_id === meta.operation_id &&
@@ -357,6 +399,7 @@ export async function perform(gh, c, chat, input, operationId, guard) {
       `${chat.name}: **${responseLabels[input.response]}**.`,
       { ...base, type: "ack", response: input.response },
       guard,
+      comments,
     );
   }
   if (input.action === "resolve") {

@@ -16,7 +16,7 @@ npx @icebergsnow/patchwork-cli@0.2.0 disconnect
 
 Connect asks for Codex or Claude Code and GitHub login if necessary. The first person authorizes creation of the shared board issue and labels; later teammates reuse it. `--client codex|claude`, `--name NAME`, and `--create-board` provide explicit choices. No Patchwork clone, Cloudflare account, or pairing code is needed.
 
-Connections affect only the current project/app. Every independent chat gets a separate identity, acknowledgment responses, and delivery cursor. Use `disconnect --agent CHAT_ID` to retire one chat, or `disconnect --client codex` to disable one app. Omit both to disconnect the project from both apps. Status lists chat IDs and actual successful hook times.
+Connections affect only the current project/app. Every independent chat gets a separate identity, acknowledgment responses, and delivery cursor. Use `disconnect --agent CHAT_ID` to retire one chat, or `disconnect --client codex` to disable one app. Omit both to disconnect the project from both apps. Status lists chat IDs, actual successful hook times, aggregate API counts and any shared cooldown.
 
 Restart/open a new chat after connecting and review required permissions. Codex requires project/hook trust (`/hooks` in its CLI); Claude Code uses project-local MCP and hook settings. Installation never bypasses trust controls. Ordinary Claude chat is not Claude Code.
 
@@ -60,3 +60,5 @@ npx @icebergsnow/patchwork-cli@0.2.0 --help
 ```
 
 The package contains its executable, runtime modules, README and manifest, with no installation scripts. Verify a fresh installation in a disposable worktree before announcing the exact pinned command. Publishing is a separate maintainer action; committing or pushing this repository does not publish it.
+
+Routine hooks check about once per minute. A shared local cache coalesces chats on the same computer/account, uses incremental GitHub reads, and reconciles every 15 minutes at a checkpoint. Each chat still has its own cursor and identity. Cached board text stays under `~/.patchwork/github/`; private repository content should be treated as private local data. See the root README for the API benchmark and recovery limits.

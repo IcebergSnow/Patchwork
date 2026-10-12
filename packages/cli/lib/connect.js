@@ -7,7 +7,6 @@ import {
   createBoard,
   findBoard,
   register,
-  snapshot,
   reconcileIntervention,
 } from "./board.js";
 import {
@@ -22,6 +21,7 @@ import {
 import { mergeCodex, mergeClaude, mergeHooks, parseConfig } from "./config.js";
 import { hookConfiguration, serverConfiguration } from "./connections.js";
 import { disabledFile, stateFile } from "./runtime.js";
+import { withBoard, accountFile } from "./sync.js";
 export const ENTRY = fileURLToPath(
   new URL("../bin/patchwork.js", import.meta.url),
 );
@@ -236,7 +236,17 @@ export async function status({ cwd, client } = {}) {
           : mergeClaude(config, root, c.server, c.server)) === config &&
         mergeHooks(hooks, c.entry, file, c.ownedHooks) === hooks;
     } catch {}
+    const usage = await readJSON(accountFile(c));
     results.push({
+      apiUsage: usage
+        ? {
+            ...usage.stats,
+            cooldownUntil:
+              usage.retryAt > Date.now()
+                ? new Date(usage.retryAt).toISOString()
+                : null,
+          }
+        : null,
       client: app,
       project: root,
       repo: c.repo,
@@ -316,16 +326,32 @@ export async function disconnect({
         );
         try {
           const gh = github || new GitHub(c.repo);
-          await gh.verify(c);
-          for (const chat of chats) {
-            chat.retireOperation ??= crypto.randomUUID();
-            await writeJSON(stateFile(file), state);
-            await register(gh, c.board, chat, false, chat.retireOperation);
-            chat.registered = false;
-            chat.registrationOperation = crypto.randomUUID();
-            await writeJSON(stateFile(file), state);
-          }
-          await reconcileIntervention(gh, await snapshot(gh, c.board));
+          if (chats.length)
+            await withBoard(c, gh, async (sync) => {
+              await sync.poll();
+              for (const chat of chats) {
+                chat.retireOperation ??= crypto.randomUUID();
+                await writeJSON(stateFile(file), state);
+                const departed = await register(
+                  gh,
+                  c.board,
+                  chat,
+                  false,
+                  chat.retireOperation,
+                  () => sync.authorize(),
+                );
+                await sync.accept(departed);
+                chat.registered = false;
+                chat.registrationOperation = crypto.randomUUID();
+                await writeJSON(stateFile(file), state);
+              }
+              await reconcileIntervention(
+                gh,
+                await sync.view(),
+                () => sync.authorize(),
+                (request) => sync.labels(request),
+              );
+            });
         } catch {
           log(
             "Local disconnect succeeded. GitHub roster cleanup is pending; rerun disconnect when connectivity/access returns.",

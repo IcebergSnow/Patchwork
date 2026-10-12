@@ -18,4 +18,5 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm test
       - run: npm run build
+      - run: npm run measure:api
       - run: npm run test:e2e

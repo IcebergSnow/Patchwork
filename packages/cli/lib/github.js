@@ -1,9 +1,13 @@
 import { spawn } from "node:child_process";
+import { digest } from "./store.js";
 
-export function run(command, args, { input, cwd, timeout = 25_000 } = {}) {
+export const VERIFY_TTL = 300_000;
+
+export function run(command, args, { input, cwd, env, timeout = 25_000 } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
+      env,
       shell: false,
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],
@@ -61,16 +65,23 @@ export class GitHubError extends Error {
 function failure(error) {
   const status = Number(error.details?.match(/HTTP (\d{3})/)?.[1]) || 0;
   const headers = error.output || "";
+  const serverNow = Date.parse(headers.match(/^date:\s*(.+)$/im)?.[1]);
+  const localDeadline = (utc) =>
+    Number.isFinite(serverNow)
+      ? Date.now() + Math.max(0, utc - serverNow)
+      : utc;
   const retry = headers.match(/^retry-after:\s*(.+)$/im)?.[1].trim();
   let retryAt = retry
     ? /^\d+$/.test(retry)
       ? Date.now() + Number(retry) * 1000
-      : Date.parse(retry)
+      : localDeadline(Date.parse(retry))
     : 0;
   if (/^x-ratelimit-remaining:\s*0\s*$/im.test(headers))
     retryAt = Math.max(
       retryAt || 0,
-      Number(headers.match(/^x-ratelimit-reset:\s*(\d+)/im)?.[1] || 0) * 1000,
+      localDeadline(
+        Number(headers.match(/^x-ratelimit-reset:\s*(\d+)/im)?.[1] || 0) * 1000,
+      ),
     );
   return new GitHubError(status, Number.isFinite(retryAt) ? retryAt : 0);
 }
@@ -79,6 +90,52 @@ export class GitHub {
     this.repo = repository(repo);
     this.runner = runner;
     this.etags = new Map();
+  }
+  async credentials() {
+    try {
+      const token = (
+        await this.runner("gh", ["auth", "token", "--hostname", "github.com"])
+      ).trim();
+      if (!token) throw new Error();
+      // Pin this operation to exactly the credential we verified. Never put it
+      // in argv, logs, the durable cache, or an error. gh still owns storage.
+      this.env = {
+        ...process.env,
+        GH_TOKEN: token,
+        GITHUB_TOKEN: "",
+        GH_DEBUG: "",
+      };
+      this.credential = digest(token);
+      return this.credential;
+    } catch {
+      this.release();
+      throw new Error(
+        "GitHub credentials unavailable. Check gh auth status and reconnect.",
+      );
+    }
+  }
+  release() {
+    this.env = undefined;
+    this.credential = undefined;
+    this.beforeRequest = undefined;
+    this.onResponse = undefined;
+  }
+  async send(args, options, method) {
+    this.beforeRequest?.();
+    try {
+      const raw = await this.runner("gh", args, { ...options, env: this.env });
+      const date = Date.parse(raw.match(/^date:\s*(.+)$/im)?.[1]);
+      if (Number.isFinite(date)) this.serverTime = date;
+      this.onResponse?.({
+        method,
+        status: Number(raw.match(/^HTTP\/[^ ]+ (\d+)/)?.[1]) || 200,
+      });
+      return raw;
+    } catch (e) {
+      const error = failure(e);
+      this.onResponse?.({ method, status: error.status, error });
+      throw error;
+    }
   }
   async request(method, endpoint, data) {
     // All endpoints are built locally. No arbitrary URL, host, or shell expansion.
@@ -105,9 +162,13 @@ export class GitHub {
     ];
     if (data !== undefined) args.push("--input", "-");
     try {
-      const raw = await this.runner("gh", args, {
-        input: data === undefined ? undefined : JSON.stringify(data),
-      });
+      const raw = await this.send(
+        args,
+        {
+          input: data === undefined ? undefined : JSON.stringify(data),
+        },
+        method,
+      );
       const boundary = raw.search(/\r?\n\r?\n/);
       const body =
         raw.startsWith("HTTP/") && boundary >= 0
@@ -116,7 +177,10 @@ export class GitHub {
       const value = body ? JSON.parse(body) : null;
       return value;
     } catch (e) {
-      throw failure(e); // Never echo remote bodies or credentials.
+      if (e instanceof GitHubError) throw e;
+      const error = failure(e);
+      this.onResponse?.({ method, status: error.status, error, count: false });
+      throw error; // Never echo remote bodies or credentials.
     }
   }
   api(method, suffix = "", body) {
@@ -126,13 +190,11 @@ export class GitHub {
   }
   async pin(number) {
     try {
-      await this.runner("gh", [
-        "issue",
-        "pin",
-        String(number),
-        "--repo",
-        `github.com/${this.repo}`,
-      ]);
+      await this.runner(
+        "gh",
+        ["issue", "pin", String(number), "--repo", `github.com/${this.repo}`],
+        { env: this.env },
+      );
     } catch {
       /* Board remains usable if pin slots or permissions prevent pinning. */
     }
@@ -159,9 +221,9 @@ export class GitHub {
     if (cached?.etag) args.push("-H", `If-None-Match: ${cached.etag}`);
     let raw;
     try {
-      raw = await this.runner("gh", args);
+      raw = await this.send(args, undefined, "GET");
     } catch (e) {
-      const error = failure(e);
+      const error = e instanceof GitHubError ? e : failure(e);
       if (error.status === 304 && cached) return cached;
       throw error;
     }
@@ -175,7 +237,9 @@ export class GitHub {
     try {
       value = JSON.parse(body);
     } catch {
-      throw new GitHubError(0);
+      const error = new GitHubError(0);
+      this.onResponse?.({ method: "GET", status: 0, error, count: false });
+      throw error;
     }
     const etag = header.match(/^etag:\s*(.+)$/im)?.[1].trim();
     const link = header.match(/^link:\s*(.+)$/im)?.[1];
@@ -223,19 +287,56 @@ export class GitHub {
     }
     return items;
   }
-  async verify(expected = {}) {
-    const user = await this.request("GET", "/user");
-    const repo = await this.api("GET");
-    if (!repo.has_issues || repo.archived || !repo.permissions?.push)
-      throw new Error(
-        "Patchwork needs an unarchived repository with Issues enabled and repository write access.",
-      );
-    if (expected.repoId && expected.repoId !== repo.id)
-      throw new Error("Repository identity changed. Reconnect explicitly.");
-    if (expected.ownerId && expected.ownerId !== user.id)
+  async verify(
+    expected = {},
+    { cache = {}, now = Date.now(), write = false } = {},
+  ) {
+    if (!this.credential) await this.credentials();
+    if (cache.credential !== this.credential) {
+      for (const key of Object.keys(cache)) delete cache[key];
+      cache.credential = this.credential;
+      this.etags.clear();
+    }
+    cache.repos ??= {};
+    const fresh = (entry) =>
+      entry && now >= entry.at && now - entry.at < VERIFY_TTL;
+    const user = fresh(cache.user)
+      ? cache.user.value
+      : await this.request("GET", "/user");
+    cache.user = {
+      at: fresh(cache.user) ? cache.user.at : now,
+      value: { id: user.id, login: user.login },
+    };
+    if (expected.ownerId && expected.ownerId !== user.id) {
+      delete cache.user;
       throw new Error(
         "GitHub account changed. Switch back to the account used for this connection.",
       );
+    }
+    const key = this.repo.toLowerCase(),
+      old = cache.repos[key];
+    // A cached read authorization never authorizes a mutation. Recheck current
+    // repository permissions for writes using the same pinned credential.
+    const repo = !write && fresh(old) ? old.value : await this.api("GET");
+    if (!repo.has_issues || repo.archived || !repo.permissions?.push) {
+      delete cache.repos[key];
+      throw new Error(
+        "Patchwork needs an unarchived repository with Issues enabled and repository write access.",
+      );
+    }
+    if (expected.repoId && expected.repoId !== repo.id) {
+      delete cache.repos[key];
+      throw new Error("Repository identity changed. Reconnect explicitly.");
+    }
+    cache.repos[key] = {
+      at: !write && fresh(old) ? old.at : now,
+      value: {
+        id: repo.id,
+        has_issues: repo.has_issues,
+        archived: repo.archived,
+        permissions: { push: repo.permissions.push },
+      },
+    };
     return { user, repo };
   }
 }

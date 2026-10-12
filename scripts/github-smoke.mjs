@@ -15,6 +15,7 @@ import {
 import { run, GitHub } from "../packages/cli/lib/github.js";
 import { readJSON } from "../packages/cli/lib/store.js";
 import { stateFile } from "../packages/cli/lib/runtime.js";
+import { accountFile } from "../packages/cli/lib/sync.js";
 if (process.env.PATCHWORK_LIVE_REPO !== "IcebergSnow/PatchworkTesting")
   throw new Error(
     "Set PATCHWORK_LIVE_REPO=IcebergSnow/PatchworkTesting to authorize sandbox writes.",
@@ -37,10 +38,19 @@ async function call(client, name, args) {
     if (
       attempt === 0 &&
       r.isError &&
-      r.content?.[0]?.text.includes("GitHub request failed (network/timeout)")
+      /GitHub request failed \((network\/timeout|5\d\d)\)/.test(
+        r.content?.[0]?.text || "",
+      )
     ) {
-      console.log(`Retrying ${name} once after a transient GitHub failure.`);
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+      const connection = await readJSON(clients[0].file);
+      const account = await readJSON(accountFile(connection));
+      const delay = Math.max(0, (account?.retryAt || 0) - Date.now());
+      assert(
+        delay <= 60000,
+        "Server requires a longer cooldown; retry the test later.",
+      );
+      console.log(`Retrying ${name} once after the shared GitHub cooldown.`);
+      await new Promise((resolve) => setTimeout(resolve, delay));
       continue; // The same arguments recover the runtime's durable operation ID.
     }
     assert(!r.isError, r.content?.[0]?.text);

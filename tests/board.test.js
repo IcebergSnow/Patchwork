@@ -242,3 +242,34 @@ test("case-insensitive repository pagination works and malformed responses stay 
     (e) => e.status === 0 && !e.message.includes("private"),
   );
 });
+
+test("verified credentials are pinned for an operation and never persisted or passed in argv", async () => {
+  let selected = "secret-A";
+  const calls = [],
+    cache = {};
+  const gh = new GitHub("team/project", async (_command, args, options) => {
+    if (args[0] === "auth") return selected;
+    calls.push({ args, token: options.env.GH_TOKEN });
+    if (args.includes("/user"))
+      return JSON.stringify({
+        id: options.env.GH_TOKEN === "secret-A" ? 1 : 2,
+        login: "test",
+      });
+    return JSON.stringify({
+      id: 99,
+      has_issues: true,
+      permissions: { push: true },
+    });
+  });
+  await gh.verify({ ownerId: 1, repoId: 99 }, { cache, now: 100 });
+  selected = "secret-B";
+  await gh.verify({ ownerId: 1, repoId: 99 }, { cache, now: 101, write: true });
+  assert(calls.every((c) => c.token === "secret-A"));
+  assert(!JSON.stringify(cache).includes("secret-A"));
+  assert(!JSON.stringify(calls.map((c) => c.args)).includes("secret-A"));
+  await gh.credentials(); // A new operation selects the changed credential.
+  await assert.rejects(
+    gh.verify({ ownerId: 1, repoId: 99 }, { cache, now: 102 }),
+    /account changed/,
+  );
+});

@@ -116,6 +116,7 @@ test("bounded backlog is eventually delivered without skipping; edits and browse
   for (let i = 0; i < 28; i++)
     assert.equal(received.join("\n").split(`message-${i} `).length - 1, 1);
   gh.comments.at(-1).body = "Edited message";
+  gh.comments.at(-1).updated_at = gh.time();
   time += CHECK_INTERVAL;
   assert(text(await hook(r, "a", "PostToolUse")).includes("Edited message"));
 });
@@ -132,12 +133,14 @@ test("failed snapshots retain cursor; uncertain writes reuse operation ID; disco
     after: true,
   };
   await assert.rejects(r.tool("post_message", data));
+  time += 61000;
   await r.tool("post_message", data);
   assert.equal(
     gh.comments.filter((c) => c.body.includes("Only once")).length,
     1,
   );
   gh.offline = true;
+  time += CHECK_INTERVAL;
   await assert.rejects(hook(r, "a", "UserPromptSubmit"));
   gh.offline = false;
   time += 61000;
@@ -158,8 +161,10 @@ test("instructions clearing is delivered; closing does not discard replies on cl
     "<!-- patchwork-instructions:start -->",
     "<!-- patchwork-instructions:start -->\nRun tests",
   );
+  time += 15000;
   assert(text(await hook(r, "a", "UserPromptSubmit")).includes("Run tests"));
   gh.issues[0].body = gh.issues[0].body.replace("\nRun tests", "");
+  time += 15000;
   assert(
     text(await hook(r, "a", "UserPromptSubmit")).includes("stop applying"),
   );
@@ -175,6 +180,7 @@ test("instructions clearing is delivered; closing does not discard replies on cl
   await gh.api("POST", `/issues/${req.number}/comments`, {
     body: "Reply after close",
   });
+  time += 15000;
   const out = text(await hook(r, "a", "UserPromptSubmit"));
   assert(out.includes("Reply after close"));
   assert(out.includes("Request closed"));
