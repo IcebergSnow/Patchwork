@@ -47,6 +47,40 @@ async function call(client, name, args) {
     return JSON.parse(r.content[0].text);
   }
 }
+async function startup(file, session) {
+  for (let attempt = 0; ; attempt++) {
+    const welcome = JSON.parse(
+      await run(process.execPath, [ENTRY, "hook", "--connection", file], {
+        input: JSON.stringify({
+          session_id: session,
+          hook_event_name: "SessionStart",
+          prompt: "Do not upload this prompt",
+        }),
+        timeout: 120000,
+      }),
+    );
+    if (welcome.hookSpecificOutput?.additionalContext.includes("chat_key"))
+      return;
+    const chat = Object.values(
+      (await readJSON(stateFile(file)))?.chats || {},
+    )[0];
+    const delay = Math.max(0, (chat?.retryAfter || 0) - Date.now());
+    if (
+      attempt === 0 &&
+      chat?.lastError?.includes("GitHub request failed (network/timeout)") &&
+      delay <= 60000
+    ) {
+      console.log(
+        "Startup check hit a transient GitHub failure; retrying after its cooldown.",
+      );
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      continue;
+    }
+    assert.fail(
+      chat?.lastError || "Startup hook did not deliver this chat's identity.",
+    );
+  }
+}
 try {
   for (let i = 0; i < 2; i++) {
     await run("git", ["init", roots[i]]);
@@ -63,21 +97,7 @@ try {
     const connection = await connect(params);
     await connect(params);
     // Execute the installed native startup hook contract in a separate process.
-    const welcome = JSON.parse(
-      await run(
-        process.execPath,
-        [ENTRY, "hook", "--connection", connection.file],
-        {
-          input: JSON.stringify({
-            session_id: `smoke-${i}`,
-            hook_event_name: "SessionStart",
-            prompt: "Do not upload this prompt",
-          }),
-          timeout: 120000,
-        },
-      ),
-    );
-    assert(welcome.hookSpecificOutput?.additionalContext.includes("chat_key"));
+    await startup(connection.file, `smoke-${i}`);
     const chat = Object.values(
       (await readJSON(stateFile(connection.file))).chats,
     )[0];
