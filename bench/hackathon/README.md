@@ -61,7 +61,9 @@ npm run sim -- validate-setup \
 under the active personal account, and initializes both with the same deterministic
 commit. It inspects existing repositories and leaves them untouched, even if empty.
 An interrupted creation/push is journaled; setup never force-pushes or repairs an
-existing repository. `validate-setup` is read-only and requires private repositories
+existing repository. Setup receipts are retained separately under `runs/setups/`;
+`setup.json` is only the latest pointer. Older single-file receipts are preserved
+before updating that pointer. `validate-setup` is read-only and requires private repositories
 with exactly the starter commit on `main`, no other branches, tags or issue history.
 Source-repository names are refused. No personal sandbox is hardcoded.
 
@@ -71,6 +73,40 @@ ID, checks every control and the pre-authorized enabled repository's immutable I
 and refuses changed or contaminated starting state. Keep the same output directory
 and reserve both repositories exclusively for this experiment. The local lock does
 not coordinate runners on different computers.
+
+### Repeat comparisons without resetting repositories
+
+Cleanup **does not restore a used repository to its starter commit**. Moving an
+advanced `main` back to its ancestor would rewrite history; replacing files with a
+new revert commit would not have the identical commit ID. Neither is used here.
+Closed board history also makes an otherwise unchanged repository unsuitable for a
+new comparison. Cleanup completion and repository reusability are reported separately.
+
+After a comparison finishes and cleanup succeeds, use either Phase 1 run ID:
+
+```sh
+npm run sim -- fresh-pair --from-run PREVIOUS_PHASE1_RUN_ID --allow-create
+```
+
+This setup-only command automatically creates two uniquely named private repositories
+under the same authenticated account, for example `BookingBaseline-sim-<suffix>` and
+`BookingEnabled-sim-<suffix>`. It pins both to the previous run's **exact original
+starter commit and scenario hash**, validates them after creation, and prints the
+baseline and enabled trial commands with the new repository names. It never starts
+Codex. Use the same `--output DIR` as the previous run if you changed the default.
+
+The old repositories and all reports remain intact. A name collision is refused
+before creation; an ambiguous or partial creation leaves a receipt for inspection
+and is never retried automatically. If the local starter has changed since the
+original comparison, creation stops before any GitHub write instead of silently
+changing the experiment. Restore the original scenario version to continue that
+series. Completed cleanup is required; resolve any failed cleanup before continuing.
+
+Before every live condition, the simulator checks private ownership, permissions,
+repository identity, exact starter `main` SHA, branches, tags and all issue history
+again. Each isolated checkout also verifies its fetched commit. There is no automatic
+reset, force-push of `main`, issue deletion, or repository deletion. Reserve sandbox
+repositories exclusively for the experiment; validation is not a cross-machine lock.
 
 ### Commands (only after live authorization)
 
@@ -127,13 +163,17 @@ Host-side setup, grading fetches, cleanup, Git transport, direct HTTP and an abs
 `gh` are excluded; reports state this coverage. It is not account-wide accounting.
 
 Cleanup stops agents, retires only owned chats, closes owned requests/issues/PRs,
-and removes owned role branches with an atomic expected-SHA lease. Foreign resources,
+and removes owned role branches with an atomic expected-SHA lease pinned to the
+archived run snapshot. Only heads also present in the agents' local branch histories
+are eligible; a name alone never proves ownership. Cleanup retries do not update
+the lease to a newly observed head. Foreign resources,
 changed accounts, or uncertain ownership cause cleanup to fail closed and retain
 local recovery state. `reset --run ID --allow-live` retries cleanup. Credentials and
 operational temporary directories are removed only after cleanup succeeds.
 Repositories, final main, closed GitHub history/labels, and local reports/bundles are
 retained intentionally for review. No command deletes or resets a repository. Use a
-new pair of names for another comparison; consumed repositories are refused.
+`fresh-pair --from-run RUN_ID --allow-create` to prepare another comparison
+automatically; consumed repositories are refused.
 
 PASS means all eight checks pass, every role contributed to submitted main, expected
 session/identity/native-startup evidence exists, token accounting is available, and
@@ -234,9 +274,9 @@ npm run sim -- preflight --repo OWNER/TEST_REPO \
 Tests and CI never launch live trials. Never treat approval of local checks as
 approval for this command.
 
-The next proposed test for this workspace is explicitly scoped to
-`IcebergSnow/PatchworkTesting`; its live execution is **awaiting authorization**.
-There is no permission to start Phase 1 afterward.
+This Phase 0 command is retained for reference. Phase 0 remains INCONCLUSIVE;
+implementation approval for Phase 1 is separate from permission to run any live
+trial. No live trial is launched by setup, cleanup, or the free tests.
 
 The `--seconds` limit is configurable from 30 to 300 seconds, shared by both
 sessions starting at session launch. Setup and cleanup can take additional time.

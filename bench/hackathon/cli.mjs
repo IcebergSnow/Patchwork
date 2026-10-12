@@ -7,7 +7,7 @@ import { preflight, cleanup } from "./lib/preflight.mjs";
 import { report } from "./lib/report.mjs";
 import { locked, digest } from "../../packages/cli/lib/store.js";
 import { localCheck } from "./lib/local-check.mjs";
-import { setupRepositories, validatePair } from "./lib/repositories.mjs";
+import { setupRepositories, validatePair, freshPair } from "./lib/repositories.mjs";
 import { trial } from "./lib/trial.mjs";
 import { cleanupTrial } from "./lib/phase1-cleanup.mjs";
 import { trialReport, compare, loadRun } from "./lib/trial-report.mjs";
@@ -16,6 +16,7 @@ const HELP = `Patchwork simulator — native hook preflight and booking comparis
 
 npm run sim -- setup --baseline-repo OWNER/BASELINE --patchwork-repo OWNER/ENABLED --allow-create
 npm run sim -- validate-setup --baseline-repo OWNER/BASELINE --patchwork-repo OWNER/ENABLED
+npm run sim -- fresh-pair --from-run PREVIOUS_PHASE1_RUN_ID --allow-create
 npm run sim -- trial --condition baseline --repo OWNER/BASELINE --peer-repo OWNER/ENABLED --sandbox-repo --allow-live
 npm run sim -- trial --condition patchwork --repo OWNER/ENABLED --baseline-run RUN_ID --sandbox-repo --allow-live
 npm run sim -- compare --baseline-run RUN_ID --patchwork-run RUN_ID
@@ -31,7 +32,8 @@ Options: --output DIR --model gpt-6-luna --reasoning low --seconds 300 --tokens 
 preflight is currently macOS only, using enforced per-process isolation.
 --sandbox-repo attests the explicitly named repository is a dedicated test sandbox.
 --allow-live authorizes GitHub writes and bounded model usage for preflight/trial.
-reset retires only this run's chats and removes owned temporary environments.
+reset retries owned-resource cleanup; it never resets main or deletes repository history.
+fresh-pair creates uniquely named private sandboxes at the previous run's original starter commit.
 delete requires completed cleanup and removes only this run's local reports.
 check-local uses read-only Codex account discovery, with no model turns or GitHub access. It cannot pass Phase 0.
 Only ChatGPT authentication with the standard OpenAI provider is allowed.
@@ -48,12 +50,17 @@ try {
     model: { type: "string" }, reasoning: { type: "string" }, seconds: { type: "string" }, tokens: { type: "string" }, codex: { type: "string" },
     "allow-live": { type: "boolean" }, "sandbox-repo": { type: "boolean" }, yes: { type: "boolean" }, "setup-only": { type: "boolean" },
     "baseline-repo": { type: "string" }, "patchwork-repo": { type: "string" }, "allow-create": { type: "boolean" },
+    "from-run": { type: "string" },
     condition: { type: "string" }, "peer-repo": { type: "string" }, "baseline-run": { type: "string" }, "patchwork-run": { type: "string" }, phase1: { type: "boolean" },
   } });
   const [cmd] = positionals;
   if (!cmd || o.help) console.log(HELP);
   else if (positionals.length !== 1) throw new Error("Use one simulator command.");
   else if (cmd === "setup") console.log(JSON.stringify(await setupRepositories(o),null,2));
+  else if (cmd === "fresh-pair") {
+    const output=path.resolve(o.output||defaultOutput);
+    await locked(path.join(output,'locks','phase1-comparison'),async()=>console.log(JSON.stringify(await freshPair(o),null,2)));
+  }
   else if (cmd === "validate-setup") console.log(JSON.stringify(await validatePair(o["baseline-repo"],o["patchwork-repo"]),null,2));
   else if (cmd === "check-local") {
     if ((await localCheck(o)).manifest.status !== "PASS") process.exitCode = 1;

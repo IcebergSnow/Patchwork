@@ -104,10 +104,12 @@ test('scope attribution covers peer edits and explicitly authorized shared files
 test('cleanup closes only owned artifacts and deletes role branches with a SHA lease',async t=>{
   const output=await temp(t),run=await newRun({repo:'owner/base',output,kind:'comparison'}),m=run.manifest;
   m.repository={id:1,userId:7};const item={id:2,number:4,title:m.runId,body:'',user:{id:7},state:'open'};let branches=[{name:'main'},{name:`${m.runId}/frontend`,commit:{sha:'abc'}}],writes=0,deletes=0;
-  const deps={api:async(route,options)=>{if(route==='/user')return {id:7};if(route==='/repos/owner/base')return {id:1,full_name:'owner/base'};if(options){writes++;item.state='closed';}return item;},
-    pages:async route=>route.endsWith('/branches')?branches:route.endsWith('/comments')?[]:[item],
+  m.initialCommit='seed';m.cleanupBranchHeads={[`${m.runId}/frontend`]:'abc'};
+  const deps={api:async(route,options)=>{if(route==='/user')return {id:7};if(route==='/repos/owner/base')return {id:1,full_name:'owner/base'};if(route.endsWith('/git/ref/heads/main'))return {object:{sha:'advanced'}};if(options){writes++;item.state='closed';}return item;},
+    pages:async route=>route.endsWith('/branches')?branches:route.endsWith('/comments')||route.endsWith('/tags')?[]:[item],
     command:async(program,args)=>{assert.equal(program,'git');assert(args.includes(`--force-with-lease=refs/heads/${m.runId}/frontend:abc`));assert(!args.includes(':refs/heads/main'));deletes++;branches=[{name:'main'}];}};
   await cleanupGitHub(run,deps);await cleanupGitHub(run,deps);assert.equal(writes,1);assert.equal(deletes,1);
+  assert.equal(m.cleanup.repository.reusable,false);assert.equal(m.cleanup.repository.currentMain,'advanced');assert.equal(m.cleanup.repository.resetPerformed,false);
   branches.push({name:'unrelated',commit:{sha:'xyz'}});await assert.rejects(cleanupGitHub(run,deps),/Unrecognized branch/);
   item.user.id=99;await assert.rejects(cleanupGitHub(run,deps),/Unrecognized issue/);
 });

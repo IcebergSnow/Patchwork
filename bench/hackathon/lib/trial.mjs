@@ -104,9 +104,11 @@ export async function sendPrompt(a,text,stage) {
 }
 async function snapshot(run,agents) {
   const m=run.manifest;
+  const localCommits=new Set([m.initialCommit]);
   // Preserve each agent's authored/unmerged work before deleting environments.
   for(const a of agents){
     const git=args=>command('git',['-C',a.work,...args],{env:a.env});
+    for(const sha of (await git(['rev-list','--branches'])).trim().split('\n'))localCommits.add(sha);
     await git(['bundle','create',path.join(run.dir,`${a.id}.bundle`),'--all']);
     await writeFile(path.join(run.dir,`${a.id}-uncommitted.patch`),redact(await git(['diff','HEAD'])),{mode:0o600});
     m.agents.find(v=>v.id===a.id).worktreeStatus=await git(['status','--short']);
@@ -115,6 +117,10 @@ async function snapshot(run,agents) {
   await command('git',['init',candidate]);
   await command('git',['-C',candidate,'-c','credential.helper=','-c','credential.helper=!gh auth git-credential','fetch','--no-tags',`https://github.com/${m.repo}.git`,'+refs/heads/*:refs/remotes/origin/*']);
   m.submittedCommit=(await command('git',['-C',candidate,'rev-parse','refs/remotes/origin/main'])).trim();
+  const remoteRefs=await command('git',['-C',candidate,'for-each-ref','--format=%(refname:strip=3) %(objectname)','refs/remotes/origin']);
+  // Pin deletion leases to the archived run snapshot, never to whatever SHA a
+  // later cleanup happens to observe. Unknown remote-only commits are preserved.
+  const cleanupBranchHeads=Object.fromEntries(remoteRefs.trim().split('\n').map(row=>row.split(' ')).filter(([name,sha])=>roles.some(r=>name===`${m.runId}/${r}`)&&localCommits.has(sha)));
   // Checkout is solely a grading snapshot. No remote code write/merge occurs.
   await command('git',['-C',candidate,'checkout','--detach',m.submittedCommit]);
   for(const a of agents)await command('git',['-C',candidate,'fetch',path.join(run.dir,`${a.id}.bundle`),`+refs/heads/*:refs/remotes/saved-${a.id}/*`]);
@@ -123,6 +129,7 @@ async function snapshot(run,agents) {
   m.integrated=await gitEvidence(candidate,m.initialCommit,[m.submittedCommit],sharedAt);
   m.integration={allRolesCommitted:roles.every(r=>m.git.commits.some(c=>c.role===r)),allRolesOnMain:roles.every(r=>m.integrated.commits.some(c=>c.role===r)),main:m.submittedCommit};
   await command('git',['-C',candidate,'bundle','create',path.join(run.dir,'submission.bundle'),'--all']);
+  m.cleanupBranchHeads=cleanupBranchHeads;
   await run.persist();m.grade=await grade(candidate,path.join(m.temp,'grading'));await run.persist();
 }
 export async function trial(options,baseline) {

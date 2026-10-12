@@ -5,6 +5,21 @@ import { api, pages } from './repositories.mjs';
 import { cleanup } from './preflight.mjs';
 import { roles } from './scenario.mjs';
 
+export async function repositoryAfterCleanup(run,deps={api,pages}) {
+  const m=run.manifest;
+  const [main,branches,issues,tags]=await Promise.all([
+    deps.api(`/repos/${m.repo}/git/ref/heads/main`),deps.pages(`/repos/${m.repo}/branches`),
+    deps.pages(`/repos/${m.repo}/issues?state=all`),deps.pages(`/repos/${m.repo}/tags`),
+  ]);
+  if(!main?.object?.sha)throw new Error('Could not verify main after cleanup.');
+  const atStarter=main.object.sha===m.initialCommit;
+  const reusable=atStarter&&branches.length===1&&branches[0].name==='main'&&issues.length===0&&tags.length===0;
+  return {verifiedAt:new Date().toISOString(),starterCommit:m.initialCommit,currentMain:main.object.sha,atStarter,reusable,
+    resetPerformed:false,branches:branches.map(b=>({name:b.name,sha:b.commit?.sha})),issues:issues.map(i=>({number:i.number,state:i.state,url:i.html_url})),tags:tags.map(t=>t.name),
+    reason:reusable?'Already pristine; no reset needed.':!atStarter?'Main advanced or changed. Resetting it would rewrite history and is refused.':'GitHub history or other refs remain; this repository is not a clean experiment.',
+    nextCommand:`npm run sim -- fresh-pair --from-run ${m.runId} --allow-create`};
+}
+
 export async function captureCollaboration(run) {
   const m=run.manifest,issues=await pages(`/repos/${m.repo}/issues?state=all`),records=[];
   for(const issue of issues)records.push({issue,comments:await pages(`/repos/${m.repo}/issues/${issue.number}/comments`)});
@@ -36,11 +51,16 @@ export async function cleanupGitHub(run, deps={api,pages,command}) {
   for(const b of branches){
     if(b.name==='main')continue;
     if(!roles.some(r=>b.name===`${m.runId}/${r}`))throw new Error(`Unrecognized branch ${b.name}; preserved.`);
+    const expected=m.cleanupBranchHeads?.[b.name];
+    if(!expected||b.commit.sha!==expected)throw new Error(`Branch ${b.name} has no matching saved run snapshot or changed after it; preserved. Refusing to refresh the deletion lease from current remote state.`);
     // The lease checks the observed SHA atomically; a concurrent update cannot
     // be silently deleted. Never reset, rewrite, merge, or delete main.
-    await deps.command('git',['-c','credential.helper=','-c','credential.helper=!gh auth git-credential','push',`--force-with-lease=refs/heads/${b.name}:${b.commit.sha}`,`https://github.com/${m.repo}.git`,`:refs/heads/${b.name}`]);
+    await deps.command('git',['-c','credential.helper=','-c','credential.helper=!gh auth git-credential','push',`--force-with-lease=refs/heads/${b.name}:${expected}`,`https://github.com/${m.repo}.git`,`:refs/heads/${b.name}`]);
     m.removedBranches.push(b.name);await run.persist();
   }
+  m.cleanup.repository=await repositoryAfterCleanup(run,deps);
+  if(m.cleanup.repository.branches.some(b=>roles.some(r=>b.name===`${m.runId}/${r}`)))throw new Error('A run branch remains or was recreated; refusing to delete it again without a matching run snapshot.');
+  await run.persist();
 }
 export async function cleanupTrial(run,clients=[]) {
   const errors=[];
@@ -57,6 +77,6 @@ export async function cleanupTrial(run,clients=[]) {
   run.manifest.cleanup.errors=errors;
   run.manifest.cleanup.complete=run.manifest.cleanup.errors.length===0;
   run.manifest.cleanup.finishedAt=new Date().toISOString();
-  run.manifest.cleanup.retained='Private repositories, published main, closed GitHub audit history and local redacted reports are intentionally retained. Fresh repositories are required for another pair.';
+  run.manifest.cleanup.retained='Repositories and submitted main commits remain on GitHub, together with closed issues/PRs/boards, comments, retired registration records and labels. Local reports, logs and bundles remain. Cleanup never rewrites main or erases history; fresh-pair automatically prepares the next comparison at the original starter commit.';
   await run.persist();
 }
