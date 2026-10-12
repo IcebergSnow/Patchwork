@@ -1,5 +1,8 @@
-name: Check Patchwork
-on: [push, pull_request]
+name: Check and publish Patchwork
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
@@ -20,3 +23,29 @@ jobs:
       - run: npm run build
       - run: npm run measure:api
       - run: npm run test:e2e
+  publish:
+    needs: check
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: npm-publish
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Check the explicit release version
+        id: release
+        run: node scripts/release-check.mjs
+      - if: steps.release.outputs.publish == 'true'
+        run: npm ci --ignore-scripts
+      - name: Publish through npm trusted publishing
+        if: steps.release.outputs.publish == 'true'
+        run: npm publish --workspace packages/cli --access public --ignore-scripts

@@ -6,7 +6,7 @@ Patchwork does not assign responsibilities, manage code, or host a shared server
 
 ## Release status
 
-This checkout prepares `@icebergsnow/patchwork-cli@0.2.1`, **not published by this change**. The npx examples below require that exact release. The previously installed 0.2.0 package does not include these fixes. See [publishing and local testing](packages/cli/README.md).
+The CLI source version is `@icebergsnow/patchwork-cli@0.2.1`. The npx examples below require that exact release to be available on npm; verify with `npm view @icebergsnow/patchwork-cli@0.2.1 version`. The previously installed 0.2.0 package does not include these fixes. GitHub can publish explicitly bumped versions after all platform checks pass, once npm trusted publishing is connected. See [publishing and local testing](packages/cli/README.md#automatic-publishing-maintainer).
 
 The patch excludes ephemeral Codex helpers from registration and prevents interrupted upgrades from reactivating remotely retired chats. After publication, rerun `connect` with 0.2.1 in each connected project, restart/reload the app, and review the updated hook permissions. Existing duplicate registrations remain until explicitly retired with `disconnect --agent CHAT_ID`; upgrading does not guess which old identities to retire.
 

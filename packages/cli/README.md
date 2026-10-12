@@ -2,7 +2,7 @@
 
 GitHub-native bulletin board tools and automatic hooks for Codex and Claude Code.
 
-**Version 0.2.1 is prepared for publication; it has not been published by this change.** Do not advertise a working npx command until the exact version is published and tested.
+The source version is 0.2.1. Verify publication with `npm view @icebergsnow/patchwork-cli@0.2.1 version` before using that exact npx command. A GitHub commit alone is not proof that publishing succeeded.
 
 ## Teammates
 
@@ -47,7 +47,33 @@ node /ABSOLUTE/PATH/Patchwork/packages/cli/bin/patchwork.js connect --repo TEAM/
 
 The main repository README describes the opt-in live sandbox test and full data/delivery behavior. Do not point automated tests at a team's production board.
 
-## Publish (maintainer)
+## Automatic publishing (maintainer)
+
+The **Check and publish Patchwork** workflow (`.github/workflows/check.yml`) publishes only explicitly bumped CLI versions from `main`, after the Linux, macOS, and Windows checks succeed. It never increments a version automatically. Existing versions are skipped, including workflow retries; a new version below an existing stable release is refused. Outdated main checkouts are skipped. Publishing jobs run one at a time and do not write commits or tags.
+
+One-time setup on [npm](https://www.npmjs.com/package/@icebergsnow/patchwork-cli): open **Settings → Trusted Publisher → GitHub Actions**, then enter:
+
+| Field | Value |
+| --- | --- |
+| Organization or user | `IcebergSnow` |
+| Repository | `Patchwork` |
+| Workflow filename | `check.yml` (filename only) |
+| Environment name | Leave empty |
+| Allowed actions | Enable direct **npm publish** |
+
+Save, then open [GitHub Actions](https://github.com/IcebergSnow/Patchwork/actions/workflows/check.yml) and select **Run workflow → main**. This reruns the checks and publishes the pending version. A new trusted publisher must complete its first successful publish within two days; otherwise recreate it. No npm token secret is needed. Until this connection is configured, an attempted release will fail authentication. See [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/).
+
+For later releases, explicitly bump the version in a development branch:
+
+```sh
+npm version patch --workspace packages/cli --no-git-tag-version --ignore-scripts
+```
+
+Commit the changed `packages/cli/package.json` and `package-lock.json` with the release changes, then merge to `main`. Use `minor` or `major` instead of `patch` when appropriate. The MCP server reads its version from the package manifest. Ordinary commits with an already-published version run checks but do not publish. Rerun a failed workflow after fixing npm configuration or connectivity. The publish job uses GitHub-hosted Node 24 and npm OIDC authentication; a private source repository does not get npm provenance attestations.
+
+Teammates' existing connections are not automatically upgraded. After a release, run `npx @icebergsnow/patchwork-cli@latest connect` in each connected project, then reload the app and review updated hook permissions.
+
+## Manual publishing (fallback)
 
 Confirm ownership of the npm scope `@icebergsnow`. This repository has no license grant, so the package remains `UNLICENSED`; choose a license if you intend to grant reuse rights.
 
@@ -61,6 +87,6 @@ npm view @icebergsnow/patchwork-cli@0.2.1 version
 npx @icebergsnow/patchwork-cli@0.2.1 --help
 ```
 
-The package contains its executable, runtime modules, README and manifest, with no installation scripts. Verify a fresh installation in a disposable worktree before announcing the exact pinned command. Publishing is a separate maintainer action; committing or pushing this repository does not publish it.
+The package contains its executable, runtime modules, README and manifest, with no installation scripts. Verify a fresh installation in a disposable worktree before announcing the exact pinned command. The automated workflow skips versions already published manually.
 
 Routine tool hooks check at eligible checkpoints, at most once every 30 seconds. A shared local cache coalesces chats on the same computer/account, uses incremental GitHub reads, and reconciles every 15 minutes at a checkpoint. Each chat still has its own cursor and identity. Cached board text stays under `~/.patchwork/github/`; private repository content should be treated as private local data. See the root README for the API benchmark and recovery limits.

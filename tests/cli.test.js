@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { symlink, unlink } from "node:fs/promises";
 import {
   parseConfig,
@@ -141,7 +142,7 @@ Runtime.prototype.hook = async function(input) {
   return {};
 };`);
   for (const transcript_path of [null, path.join(dir, "saved.jsonl")]) {
-    const output = await run(process.execPath, ["--import", preload, ENTRY, "hook", "--connection", path.join(dir, "connection.json")], {
+    const output = await run(process.execPath, ["--import", pathToFileURL(preload).href, ENTRY, "hook", "--connection", path.join(dir, "connection.json")], {
       env: { ...process.env, EXPECT_PATH: transcript_path || "" },
       input: JSON.stringify({ session_id: "test", hook_event_name: "SessionStart", transcript_path, prompt: "private prompt", tool_output: "private output", transcript: "private transcript" }),
     });

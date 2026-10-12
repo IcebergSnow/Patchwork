@@ -6,6 +6,7 @@ import { server } from "../packages/cli/lib/mcp.js";
 import { Runtime, stateFile } from "../packages/cli/lib/runtime.js";
 import { readJSON } from "../packages/cli/lib/store.js";
 import { connection } from "./fixtures.js";
+import { readFile } from "node:fs/promises";
 test("real MCP protocol exposes narrow tools, rejects old recipient parameters and isolates chat acknowledgments", async (t) => {
   const { file, gh } = await connection(t);
   const runtime = new Runtime(file, { github: gh });
@@ -19,6 +20,8 @@ test("real MCP protocol exposes narrow tools, rejects old recipient parameters a
     await client.close();
     await mcp.close();
   });
+  const pkg = JSON.parse(await readFile(new URL("../packages/cli/package.json", import.meta.url), "utf8"));
+  assert.equal(client.getServerVersion().version, pkg.version);
   const tools = await client.listTools();
   assert.deepEqual(tools.tools.map((t) => t.name).sort(), [
     "acknowledge_request",

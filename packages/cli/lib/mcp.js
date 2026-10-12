@@ -2,9 +2,12 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { Runtime } from "./runtime.js";
+import { readFileSync } from "node:fs";
+
+const { version } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 
 export function server(runtime) {
-  const mcp = new McpServer({ name: "patchwork", version: "0.2.1" });
+  const mcp = new McpServer({ name: "patchwork", version });
   const key = z
     .string()
     .uuid()
