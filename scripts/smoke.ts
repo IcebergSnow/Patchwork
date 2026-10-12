@@ -19,41 +19,59 @@ const member=created.body.token;
 const connection=await request('/api/agents','POST',{name:'Smoke agent',client:'codex'},member);
 assert.equal(connection.status,201);
 const agent=connection.body.token;
+const peerConnection=await request('/api/agents','POST',{name:'Second agent',client:'claude'},member);
+assert.equal(peerConnection.status,201);
+const peer=new Client({name:'patchwork-peer-smoke',version:'1.0.0'});
 assert.equal((await request('/api/board','GET',undefined,agent)).status,401,'Agent token must not grant browser administration');
 assert.equal((await request('/api/instructions','PUT',{instructions:'Run tests before pushing.',version:0},member)).status,200);
 const client=new Client({name:'patchwork-smoke',version:'1.0.0'});
 await client.connect(new StreamableHTTPClientTransport(new URL('/mcp',base),{requestInit:{headers:{Authorization:`Bearer ${agent}`}}}));
 try {
+  await peer.connect(new StreamableHTTPClientTransport(new URL('/mcp',base),{requestInit:{headers:{Authorization:`Bearer ${peerConnection.body.token}`}}}));
   const tools=await client.listTools();
   assert.deepEqual(tools.tools.map(t=>t.name).sort(),['check_board','post_message','read_messages','resolve_request']);
-  const call=async(name:string,args:Record<string,unknown>)=>{
-    const result=await client.callTool({name,arguments:args});
+  assert.ok(!('recipientId' in tools.tools.find(t=>t.name==='post_message')!.inputSchema.properties!));
+  assert.ok(!('relevant_only' in tools.tools.find(t=>t.name==='read_messages')!.inputSchema.properties!));
+  const call=async(name:string,args:Record<string,unknown>,who=client)=>{
+    const result=await who.callTool({name,arguments:args});
     assert.ok(!result.isError,JSON.stringify(result));
     return JSON.parse((result.content as {type:string;text:string}[])[0].text);
   };
   const initial=await call('check_board',{session_id:'smoke-session',hook_event_name:'UserPromptSubmit'});
   assert.match(initial.hookSpecificOutput.additionalContext,/Run tests before pushing/);
-  const posted=(await request('/api/messages','POST',{body:'Need a test endpoint',kind:'request',recipientId:connection.body.id},member)).body;
+  await call('check_board',{session_id:'smoke-session',hook_event_name:'UserPromptSubmit'},peer);
+  const obsolete=await request('/api/messages','POST',{body:'Obsolete recipient',recipientId:connection.body.id},member);
+  assert.equal(obsolete.status,400);
+  const obsoleteTool=await client.callTool({name:'post_message',arguments:{body:'Obsolete recipient',recipientId:connection.body.id}});
+  assert.ok(obsoleteTool.isError);
+  const posted=(await request('/api/messages','POST',{body:'Second agent, could you add a test endpoint?',kind:'request'},member)).body;
   assert.equal((await request(`/api/requests/${posted.id}/claim`,'POST',{},member)).status,404);
   assert.equal((await request(`/api/agents/${connection.body.id}`,'PATCH',{scope:'obsolete'},member)).status,404);
-  const directed=await call('check_board',{session_id:'smoke-session',hook_event_name:'UserPromptSubmit'});
-  assert.match(directed.hookSpecificOutput.additionalContext,/Need a test endpoint/);
+  for(const who of [client,peer]) {
+    const delivery=await call('check_board',{session_id:'smoke-session',hook_event_name:'UserPromptSubmit'},who);
+    assert.match(delivery.hookSpecificOutput.additionalContext,/Second agent, could you add a test endpoint/);
+    assert.ok(!delivery.hookSpecificOutput.additionalContext.includes('recipientId'));
+    assert.deepEqual(await call('check_board',{session_id:'smoke-session',hook_event_name:'UserPromptSubmit'},who),{});
+  }
   await call('post_message',{body:'The endpoint is available.',kind:'message',replyTo:posted.id});
-  await call('resolve_request',{request_id:posted.id});
+  const stillOpen=await call('read_messages',{open_only:true});
+  assert.equal(stillOpen.messages[0].status,'open','A reply must not resolve a request');
+  await call('resolve_request',{request_id:posted.id},peer);
   const feed=await call('read_messages',{after_id:0,limit:100});
   assert.ok(feed.messages.length>=3);assert.equal(feed.openRequests.length,0);
   await call('resolve_request',{request_id:posted.id,reopen:true});
-  const open=await call('read_messages',{after_id:0,open_only:true,relevant_only:true});
+  const open=await call('read_messages',{after_id:0,open_only:true});
   assert.deepEqual(open.messages.map((m:any)=>m.id),[posted.id]);
   assert.equal(open.messages[0].status,'open');
   assert.ok(!('claimed_by' in open.messages[0]));
+  assert.ok(!('recipient_id' in open.messages[0]));
   await call('resolve_request',{request_id:posted.id});
   const board=await request('/api/board','GET',undefined,member);
   assert.equal(board.body.room.instructions,'Run tests before pushing.');
   assert.ok(!('integration' in board.body));
   assert.ok(!('scope' in board.body.agents[0]));
-  assert.ok(board.body.agents[0].last_hook_at);
-  assert.ok(board.body.agents[0].last_seen_at);
+  assert.ok(board.body.agents.every((a:any)=>a.last_hook_at&&a.last_seen_at));
+  assert.ok(board.body.messages.every((m:any)=>!('recipient_id' in m)));
   assert.ok(!JSON.stringify(board.body).includes(agent));
   const forbidden=await fetch(new URL('/api/board',base),{headers:{Authorization:`Bearer ${member}`,Origin:'https://unrelated.example'}});
   assert.equal(forbidden.status,403);
@@ -64,5 +82,6 @@ try {
   await request(`/api/agents/${connection.body.id}`,'DELETE',undefined,member);
   const revoked=await fetch(new URL('/mcp',base),{method:'POST',headers:{Authorization:`Bearer ${agent}`,'Content-Type':'application/json'},body:'{}'});
   assert.equal(revoked.status,401);
-  console.log('HTTP + MCP smoke passed: room setup, all 4 board/hook tools, instructions, directed requests, origin checks, input limits, and revocation.');
-}finally{await client.close();}
+  await request(`/api/agents/${peerConnection.body.id}`,'DELETE',undefined,member);
+  console.log('HTTP + MCP smoke passed: room setup, all 4 board/hook tools, shared delivery to two agents, explicit resolution, instructions, origin checks, input limits, and revocation.');
+}finally{await Promise.all([client.close(),peer.close()]);}

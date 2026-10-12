@@ -51,24 +51,23 @@ test('request changes are atomic, idempotent, and visible after a message cursor
   assert.equal((await snapshot(db,owner,0,true)).openRequests,1);
 });
 
-test('only the requester, intended recipient, or room owner can resolve and reopen',async()=>{
+test('any participant in the room can explicitly resolve and reopen a request',async()=>{
   const {db,owner,credentials}=await fixture();
   const joined=await joinRoom(db,{name:'Bob',invite:credentials.invite});
   const bob=await authenticate(db,`Bearer ${joined.token}`,'member');
-  const target=await createAgent(db,bob,{name:'Target'});
-  const recipient=await authenticate(db,`Bearer ${target.token}`,'agent');
-  const other=await createAgent(db,owner,{name:'Other'});
-  const unrelated=await authenticate(db,`Bearer ${other.token}`,'agent');
-  const request=await postMessage(db,bob,{kind:'request',body:'Need help',recipientId:target.id});
-  await postMessage(db,unrelated,{body:'I can help too',replyTo:request.id});
-  for(const action of ['resolve','reopen'] as const) await assert.rejects(requestAction(db,unrelated,request.id,action),errorStatus(403));
-  for(const actor of [recipient,bob,owner]) {
+  const third=await joinRoom(db,{name:'Carol',invite:credentials.invite});
+  const carol=await authenticate(db,`Bearer ${third.token}`,'member');
+  const connection=await createAgent(db,bob,{name:'Teammate'});
+  const agent=await authenticate(db,`Bearer ${connection.token}`,'agent');
+  const request=await postMessage(db,bob,{kind:'request',body:'Need help'});
+  // No participation, acknowledgement, or named recipient is required.
+  for(const actor of [agent,carol,bob,owner]) {
     assert.equal((await requestAction(db,actor,request.id,'resolve')).status,'resolved');
     assert.equal((await requestAction(db,actor,request.id,'reopen')).status,'open');
   }
-  const broadcast=await postMessage(db,bob,{kind:'request',body:'Everyone: help'});
-  await assert.rejects(requestAction(db,recipient,broadcast.id,'resolve'),errorStatus(403));
-  assert.equal((await requestAction(db,bob,broadcast.id,'resolve')).status,'resolved');
+  const otherRoom=await createRoom(db,{name:'Other room',memberName:'Other'});
+  const outsider=await authenticate(db,`Bearer ${otherRoom.token}`,'member');
+  for(const action of ['resolve','reopen'] as const) await assert.rejects(requestAction(db,outsider,request.id,action),errorStatus(404));
 });
 
 test('revocation and rotation invalidate old credentials without removing history',async()=>{
@@ -103,22 +102,30 @@ test('only the owner edits instructions and stale edits cannot overwrite newer t
   await saveInstructions(db,owner,{instructions:'',version:1});
 });
 
-test('directed messages stay room-visible and replies retain their recipient',async()=>{
-  const {db,owner}=await fixture();
-  const one=await createAgent(db,owner,{name:'Frontend',client:'codex'});
-  const two=await createAgent(db,owner,{name:'Backend',client:'claude'});
-  const frontend=await authenticate(db,`Bearer ${one.token}`,'agent');
-  const backend=await authenticate(db,`Bearer ${two.token}`,'agent');
-  const root=await postMessage(db,frontend,{body:'Need ownerName',kind:'request',recipientId:two.id});
-  const reply=await postMessage(db,backend,{body:'On it',replyTo:root.id});
-  assert.equal(reply.recipient_id,two.id);
-  assert.equal((await readMessages(db,owner)).messages[0].recipient_id,two.id);
-  await assert.rejects(postMessage(db,frontend,{body:'Redirect',replyTo:root.id,recipientId:one.id}),errorStatus(400));
-  const other=await createRoom(db,{name:'Other',memberName:'Other'});
-  const otherOwner=await authenticate(db,`Bearer ${other.token}`,'member');
-  await assert.rejects(postMessage(db,otherOwner,{body:'Cross room',recipientId:two.id}),errorStatus(400));
-  await rotateAgent(db,owner,two.id,true);
-  await assert.rejects(postMessage(db,owner,{body:'Revoked target',recipientId:two.id}),errorStatus(400));
+test('historical recipient metadata is preserved but never exposed, inherited, or used for permissions',async()=>{
+  const {db,sqlite,owner}=await fixture();
+  const one=await createAgent(db,owner,{name:'Teammate A'});
+  const two=await createAgent(db,owner,{name:'Teammate B'});
+  const agent=await authenticate(db,`Bearer ${one.token}`,'agent');
+  const root=await postMessage(db,owner,{body:'Original request',kind:'request'});
+  sqlite.prepare('UPDATE messages SET recipient_id = ? WHERE id = ?').run(two.id,root.id);
+  const reply=await postMessage(db,agent,{body:'Here is the result',replyTo:root.id});
+  const nested=await postMessage(db,owner,{body:'Thanks for the context',replyTo:reply.id});
+  assert.equal(nested.reply_to,root.id);
+  assert.equal((await snapshot(db,owner,0,true)).openRequests,1,'Replies never resolve requests');
+  for(const actor of [owner,agent]) {
+    const feed=await readMessages(db,actor);
+    assert.ok(feed.messages.every(m=>!('recipient_id' in m)));
+    assert.equal(feed.messages[0].body,'Original request');
+  }
+  assert.ok((await snapshot(db,owner)).messages.every(m=>!('recipient_id' in m)));
+  const resolved=await requestAction(db,agent,root.id,'resolve');
+  assert.equal(resolved.status,'resolved');assert.ok(!('recipient_id' in resolved));
+  await postMessage(db,agent,{body:'One more detail',replyTo:root.id});
+  assert.equal((await readMessages(db,owner)).messages[0].status,'resolved','Replies never reopen requests');
+  assert.equal(sqlite.prepare('SELECT recipient_id FROM messages WHERE id = ?').get(root.id)!.recipient_id,two.id);
+  assert.ok(sqlite.prepare('SELECT recipient_id FROM messages WHERE id > ?').all(root.id).every(row=>row.recipient_id===null));
+  await assert.rejects(postMessage(db,agent,{body:'Obsolete routing',recipientId:two.id}),errorStatus(400));
 });
 
 test('an identity alone creates a connection; old scope data is not exposed or changed',async()=>{

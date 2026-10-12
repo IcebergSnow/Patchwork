@@ -23,6 +23,9 @@ try {
   }
   if (!ready) throw new Error(`Preview did not become ready: ${output}`);
   await run(process.execPath, ['--import', 'tsx', 'scripts/smoke.ts'], { ...process.env, PATCHWORK_BASE_URL: 'http://127.0.0.1:8791' });
+} catch (error) {
+  console.error(output);
+  throw error;
 } finally {
   server.kill('SIGTERM');
 }

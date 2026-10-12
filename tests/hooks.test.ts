@@ -9,29 +9,34 @@ async function fixture() {
   const { db, sqlite } = database();
   const room = await createRoom(db,{name:'Hook room',memberName:'Owner'});
   const owner = await authenticate(db,`Bearer ${room.token}`,'member');
-  const one = await createAgent(db,owner,{name:'Frontend',client:'codex'});
-  const two = await createAgent(db,owner,{name:'Backend',client:'claude'});
+  const one = await createAgent(db,owner,{name:'Teammate A',client:'codex'});
+  const two = await createAgent(db,owner,{name:'Teammate B',client:'claude'});
   const agent = await authenticate(db,`Bearer ${one.token}`,'agent');
-  const backend = await authenticate(db,`Bearer ${two.token}`,'agent');
-  return { db, sqlite, owner, agent, backend };
+  const peer = await authenticate(db,`Bearer ${two.token}`,'agent');
+  return { db, sqlite, owner, agent, peer };
 }
 const event = (session='chat-1', kind='PostToolUse') => ({session_id:session,hook_event_name:kind});
 const context = (result: Awaited<ReturnType<typeof checkBoard>>) => result.hookSpecificOutput?.additionalContext ?? '';
 const start = 1_000_000;
 
-test('native hook contract delivers identities, relevant messages, and custom instructions',async()=>{
-  const {db,sqlite,owner,agent,backend}=await fixture();
+test('startup hooks deliver the same board to every agent with identities and custom instructions',async()=>{
+  const {db,sqlite,owner,agent,peer}=await fixture();
   sqlite.prepare('UPDATE agents SET scope = ?').run('Legacy authoritative scope');
   await saveInstructions(db,owner,{instructions:'Run tests before pushing.',version:0});
-  await postMessage(db,owner,{body:'For frontend',recipientId:agent.id,kind:'request'});
-  await postMessage(db,owner,{body:'Backend only reminder',recipientId:backend.id});
+  const request=await postMessage(db,owner,{body:'Teammate A, can you help?',kind:'request'});
+  sqlite.prepare('UPDATE messages SET recipient_id = ? WHERE id = ?').run(agent.id,request.id);
+  await postMessage(db,owner,{body:'Teammate B, here is some context'});
   await postMessage(db,owner,{body:'Everyone: API shapes are ready'});
-  const result=await checkBoard(db,agent,event('chat-1','UserPromptSubmit'),start);
-  assert.equal(result.hookSpecificOutput?.hookEventName,'UserPromptSubmit');
-  assert.match(context(result),/Frontend|Backend/);assert.ok(!context(result).includes('Legacy authoritative scope'));assert.ok(!context(result).includes('claim'));assert.match(context(result),/Run tests before pushing/);
-  assert.match(context(result),/For frontend/);assert.match(context(result),/Everyone: API/);
-  assert.ok(!context(result).includes('Backend only reminder'));
-  assert.ok(!('decision' in result));assert.ok(!('continue' in result));
+  for(const actor of [agent,peer]) {
+    const result=await checkBoard(db,actor,event('chat-1','SessionStart'),start);
+    assert.equal(result.hookSpecificOutput?.hookEventName,'SessionStart');
+    const text=context(result);
+    assert.match(text,/Teammate A|Teammate B/);assert.ok(text.includes(actor.id));
+    assert.ok(!text.includes('Legacy authoritative scope'));assert.ok(!text.includes('recipientId'));assert.ok(!text.includes('claim'));
+    assert.match(text,/Run tests before pushing/);assert.match(text,/Teammate A, can you help/);
+    assert.match(text,/Teammate B, here is some context/);assert.match(text,/Everyone: API/);
+    assert.ok(!('decision' in result));assert.ok(!('continue' in result));
+  }
 });
 
 test('tool checkpoints throttle, cursors deduplicate, and separate chats get their own context',async()=>{
@@ -99,11 +104,11 @@ test('bounded previews do not skip a backlog, and failures preserve the cursor f
   assert.equal(sqlite.prepare('SELECT lease_until FROM hook_sessions').get()!.lease_until,0);
 });
 
-test('directed-thread replies reach the requesting agent and room isolation applies to hooks',async()=>{
-  const {db,owner,agent,backend}=await fixture();
-  const request=await postMessage(db,agent,{body:'Need field',kind:'request',recipientId:backend.id});
+test('thread replies are delivered while hook history stays isolated by room',async()=>{
+  const {db,owner,agent,peer}=await fixture();
+  const request=await postMessage(db,agent,{body:'Need field',kind:'request'});
   await checkBoard(db,agent,event(),start);
-  await postMessage(db,backend,{body:'Here is the field',replyTo:request.id});
+  await postMessage(db,peer,{body:'Here is the field',replyTo:request.id});
   const second=await createRoom(db,{name:'Secret room',memberName:'Other'});
   const outsider=await authenticate(db,`Bearer ${second.token}`,'member');
   await postMessage(db,outsider,{body:'Room-private secret'});
@@ -135,17 +140,17 @@ test('large rosters never truncate owner instructions',async()=>{
 });
 
 test('first contact prioritizes old open requests and recent context, then skips historical backlog',async()=>{
-  const {db,sqlite,owner,agent,backend}=await fixture();
-  const open=await postMessage(db,owner,{body:'Old open request for you',kind:'request',recipientId:agent.id});
+  const {db,sqlite,owner,agent,peer}=await fixture();
+  const open=await postMessage(db,owner,{body:'Old open request for you',kind:'request'});
   const resolved=await postMessage(db,owner,{body:'Old resolved request',kind:'request'});
   await requestAction(db,owner,resolved.id,'resolve');
   for(let i=0;i<60;i++)await postMessage(db,owner,{body:`Archived announcement ${i}`});
-  await postMessage(db,owner,{body:'Request only for another agent',kind:'request',recipientId:backend.id});
-  for(let i=0;i<3;i++)await postMessage(db,owner,{body:`Recent relevant context ${i}`});
+  await postMessage(db,owner,{body:'Teammate B, another request',kind:'request'});
+  for(let i=0;i<3;i++)await postMessage(db,owner,{body:`Recent context ${i}`});
   const boundary=Number(sqlite.prepare('SELECT MAX(id) AS id FROM messages').get()!.id);
   const first=context(await checkBoard(db,agent,event(),start));
-  assert.match(first,/Old open request for you/);assert.match(first,/Recent relevant context 2/);
-  assert.ok(!first.includes('Archived announcement'));assert.ok(!first.includes('Old resolved request'));assert.ok(!first.includes('Request only for another agent'));
+  assert.match(first,/Old open request for you/);assert.match(first,/Recent context 2/);
+  assert.ok(!first.includes('Archived announcement'));assert.ok(!first.includes('Old resolved request'));assert.ok(first.includes('Teammate B, another request'));
   assert.equal(first.split(`"id":${open.id},`).length-1,1);
   assert.equal(sqlite.prepare('SELECT cursor FROM hook_sessions').get()!.cursor,boundary);
   assert.deepEqual(await checkBoard(db,agent,event(),start+CHECK_INTERVAL_MS),{});
@@ -157,29 +162,34 @@ test('first contact prioritizes old open requests and recent context, then skips
 test('large initial request sets stay bounded and all remaining requests are readable with a cursor',async()=>{
   const {db,owner,agent}=await fixture();
   await saveInstructions(db,owner,{instructions:'i'.repeat(4000),version:0});
-  for(let i=0;i<30;i++)await postMessage(db,owner,{body:`Request ${i}: `+'r'.repeat(7000),kind:'request',recipientId:agent.id});
+  for(let i=0;i<30;i++)await postMessage(db,owner,{body:`Request ${i}: `+'r'.repeat(7000),kind:'request'});
   const first=context(await checkBoard(db,agent,event(),start));
-  assert.ok(first.length<=12000);assert.match(first,/More relevant open requests/);
+  assert.ok(first.length<=12000);assert.match(first,/More open requests/);
   assert.ok(first.includes('i'.repeat(4000)));
   const ids=new Set<number>();let cursor=0,more=true;
   while(more) {
-    const page=await readMessages(db,agent,cursor,7,{openOnly:true,relevantOnly:true});
+    const page=await readMessages(db,agent,cursor,7,{openOnly:true});
     page.messages.forEach(m=>ids.add(m.id));cursor=page.nextCursor;more=page.hasMore;
   }
   assert.equal(ids.size,30);
   assert.deepEqual(await checkBoard(db,agent,event(),start+CHECK_INTERVAL_MS),{});
 });
 
-test('discussions reach participating agents without a role directory or cross-agent cursor sharing',async()=>{
-  const {db,owner,agent,backend}=await fixture();
-  const target=await createAgent(db,owner,{name:'Third teammate'});
-  const thread=await postMessage(db,owner,{body:'Addressed elsewhere',recipientId:target.id});
-  await postMessage(db,agent,{body:'I have useful context',replyTo:thread.id});
-  await checkBoard(db,agent,event('same-session'),start);
-  await checkBoard(db,backend,event('same-session'),start);
-  await postMessage(db,owner,{body:'Follow-up for this discussion',replyTo:thread.id});
-  assert.match(context(await checkBoard(db,agent,event('same-session'),start+CHECK_INTERVAL_MS)),/Follow-up for this discussion/);
-  assert.deepEqual(await checkBoard(db,backend,event('same-session'),start+CHECK_INTERVAL_MS),{});
+test('every agent receives new messages, replies, and status changes once, including its own posts',async()=>{
+  const {db,owner,agent,peer}=await fixture();
+  const third=await createAgent(db,owner,{name:'Third teammate'});
+  const observer=await authenticate(db,`Bearer ${third.token}`,'agent');
+  const agents=[agent,peer,observer];
+  for(const actor of agents) await checkBoard(db,actor,event('same-session'),start);
+  const request=await postMessage(db,agent,{body:'Teammate B, can you add a field?',kind:'request'});
+  await postMessage(db,peer,{body:'Here is the field',replyTo:request.id});
+  await requestAction(db,observer,request.id,'resolve');
+  for(const actor of agents) {
+    const text=context(await checkBoard(db,actor,event('same-session'),start+CHECK_INTERVAL_MS));
+    assert.match(text,/Teammate B, can you add a field/);assert.match(text,/Here is the field/);assert.match(text,/Marked this request resolved/);
+    assert.equal(text.split(`"id":${request.id},`).length-1,1);
+    assert.deepEqual(await checkBoard(db,actor,event('same-session'),start+2*CHECK_INTERVAL_MS),{});
+  }
 });
 
 test('failed initialization and failed cursor commits retry; abandoned leases expire',async()=>{

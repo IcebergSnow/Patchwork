@@ -18,8 +18,7 @@ export const agentSchema = z.object({ name, client: clientSchema.default('other'
 export const instructionsSchema = z.object({ instructions: z.string().trim().max(4000), version: z.number().int().nonnegative() });
 export const postSchema = z.object({
   body: text, kind: kindSchema.default('message'), replyTo: z.number().int().positive().optional(),
-  recipientId: z.string().uuid().nullable().optional(),
-}).refine(data => !(data.replyTo && data.kind === 'request'), 'Start a new thread for a request.');
+}).strict().refine(data => !(data.replyTo && data.kind === 'request'), 'Start a new thread for a request.');
 export type Room = {
   id: string; name: string; repository: string; base_branch: string; owner_id: string;
   invite_hash: string; merger_id: string | null; created_at: string;
@@ -28,16 +27,16 @@ export type Room = {
 export type Actor = { id: string; name: string; kind: 'member' | 'agent'; room: Room; memberId?: string };
 export type Message = {
   id: number; room_id: string; author_id: string; author_name: string; author_type: 'member' | 'agent';
-  kind: z.infer<typeof kindSchema>; body: string; reply_to: number | null; recipient_id: string | null;
+  kind: z.infer<typeof kindSchema>; body: string; reply_to: number | null;
   status: 'open' | 'resolved' | null; created_at: string;
 };
-// Historical categories and claim metadata remain in storage, not the active board contract.
+// Historical categories and coordination metadata remain in storage, outside the board contract.
 type StoredMessage = Omit<Message, 'kind'> & {
   kind: Message['kind'] | 'note' | 'update' | 'ready' | 'integration';
-  claimed_by?: string | null; claimed_name?: string | null;
+  claimed_by?: string | null; claimed_name?: string | null; recipient_id?: string | null;
 };
 function publicMessage(row: StoredMessage): Message {
-  const { claimed_by: _legacyId, claimed_name: _legacyName, ...message } = row;
+  const { claimed_by: _legacyId, claimed_name: _legacyName, recipient_id: _legacyRecipient, ...message } = row;
   return { ...message, kind: row.kind === 'request' ? 'request' : 'message' };
 }
 export type Agent = {
@@ -131,48 +130,37 @@ export async function saveInstructions(db: D1Database, actor: Actor, input: unkn
 }
 export async function postMessage(db: D1Database, actor: Actor, input: unknown) {
   const data = parse(postSchema, input);
-  let parent: number | null = null, recipient = data.recipientId ?? null;
+  let parent: number | null = null;
   if (data.replyTo) {
-    const message = await db.prepare('SELECT id, reply_to, recipient_id FROM messages WHERE id = ? AND room_id = ?').bind(data.replyTo, actor.room.id).first<Pick<Message, 'id' | 'reply_to' | 'recipient_id'>>();
+    const message = await db.prepare('SELECT id, reply_to FROM messages WHERE id = ? AND room_id = ?').bind(data.replyTo, actor.room.id).first<Pick<Message, 'id' | 'reply_to'>>();
     if (!message) throw new HttpError(404, 'Thread not found in this room.');
     parent = message.reply_to ?? message.id;
-    if (data.recipientId !== undefined && data.recipientId !== message.recipient_id) throw new HttpError(400, 'Replies keep the thread’s recipient.');
-    recipient = message.recipient_id;
-  } else if (recipient && !(await db.prepare('SELECT id FROM agents WHERE id = ? AND room_id = ? AND revoked = 0').bind(recipient, actor.room.id).first())) {
-    throw new HttpError(400, 'Choose an active agent in this room.');
   }
-  const message = await db.prepare('INSERT INTO messages (room_id, author_id, author_name, author_type, kind, body, reply_to, status, created_at, recipient_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *')
-    .bind(actor.room.id, actor.id, actor.name, actor.kind, data.kind, data.body, parent, data.kind === 'request' ? 'open' : null, now(), recipient).first<StoredMessage>();
+  const message = await db.prepare('INSERT INTO messages (room_id, author_id, author_name, author_type, kind, body, reply_to, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *')
+    .bind(actor.room.id, actor.id, actor.name, actor.kind, data.kind, data.body, parent, data.kind === 'request' ? 'open' : null, now()).first<StoredMessage>();
   return publicMessage(message!);
 }
 export async function requestAction(db: D1Database, actor: Actor, id: number, action: 'resolve' | 'reopen') {
   parse(z.enum(['resolve', 'reopen']), action);
   const request = await db.prepare("SELECT * FROM messages WHERE id = ? AND room_id = ? AND kind = 'request' AND reply_to IS NULL").bind(id, actor.room.id).first<Message>();
   if (!request) throw new HttpError(404, 'Request not found.');
-  const owner = actor.kind === 'member' && actor.id === actor.room.owner_id;
-  if (!owner && actor.id !== request.author_id && actor.id !== request.recipient_id) throw new HttpError(403, 'Only the requester, intended recipient, or room owner can change this request.');
   // Commit the transition and its cursor-visible reply together. Retries are idempotent.
   await db.batch([
     db.prepare('UPDATE messages SET status = ? WHERE id = ? AND room_id = ? AND status != ?')
       .bind(action === 'resolve' ? 'resolved' : 'open', id, actor.room.id, action === 'resolve' ? 'resolved' : 'open'),
-    db.prepare(`INSERT INTO messages (room_id, author_id, author_name, author_type, kind, body, reply_to, recipient_id, created_at)
-      SELECT ?, ?, ?, ?, 'message', ?, ?, ?, ? WHERE changes() = 1`)
-      .bind(actor.room.id, actor.id, actor.name, actor.kind, action === 'resolve' ? 'Marked this request resolved.' : 'Reopened this request.', id, request.recipient_id, now()),
+    db.prepare(`INSERT INTO messages (room_id, author_id, author_name, author_type, kind, body, reply_to, created_at)
+      SELECT ?, ?, ?, ?, 'message', ?, ?, ? WHERE changes() = 1`)
+      .bind(actor.room.id, actor.id, actor.name, actor.kind, action === 'resolve' ? 'Marked this request resolved.' : 'Reopened this request.', id, now()),
   ]);
   return publicMessage((await db.prepare('SELECT * FROM messages WHERE id = ? AND room_id = ?').bind(id, actor.room.id).first<StoredMessage>())!);
 }
 export async function readMessages(db: D1Database, actor: Actor, after = 0, limit = 100,
-  options: { openOnly?: boolean; relevantOnly?: boolean; through?: number; latest?: boolean } = {}) {
+  options: { openOnly?: boolean; through?: number; latest?: boolean } = {}) {
   const rows = await db.prepare(`SELECT m.* FROM messages m
-    LEFT JOIN messages root ON root.id = m.reply_to AND root.room_id = m.room_id
     WHERE m.room_id = ? AND m.id > ? AND m.id <= ?
     ${options.openOnly ? "AND m.kind = 'request' AND m.status = 'open' AND m.reply_to IS NULL" : ''}
-    ${options.relevantOnly ? `AND (m.recipient_id IS NULL OR m.recipient_id = ? OR m.author_id = ? OR root.author_id = ?
-      OR EXISTS (SELECT 1 FROM messages participant WHERE participant.room_id = m.room_id
-        AND participant.reply_to = COALESCE(m.reply_to, m.id) AND participant.author_id = ?))` : ''}
     ORDER BY m.id ${options.latest ? 'DESC' : 'ASC'} LIMIT ?`)
-    .bind(actor.room.id, after, options.through ?? Number.MAX_SAFE_INTEGER,
-      ...(options.relevantOnly ? [actor.id, actor.id, actor.id, actor.id] : []), limit + 1).all<StoredMessage>();
+    .bind(actor.room.id, after, options.through ?? Number.MAX_SAFE_INTEGER, limit + 1).all<StoredMessage>();
   const messages = rows.results.slice(0, limit).map(publicMessage);
   return { messages, nextCursor: messages.at(-1)?.id ?? after, hasMore: rows.results.length > limit };
 }

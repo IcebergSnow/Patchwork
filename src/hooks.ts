@@ -14,7 +14,7 @@ type HookState = {
 };
 function preview(message: Message, length: number) {
   return `\n\nBoard message: ${JSON.stringify({ id:message.id, thread:message.reply_to ?? message.id, from:message.author_name,
-    kind:message.kind, status:message.status, recipientId:message.recipient_id, body:message.body.slice(0, length) })}${message.body.length > length ? `\nPreview only. Read the full message with read_messages after_id=${message.id - 1}.` : ''}`;
+    kind:message.kind, status:message.status, body:message.body.slice(0, length) })}${message.body.length > length ? `\nPreview only. Read the full message with read_messages after_id=${message.id - 1}.` : ''}`;
 }
 
 /** Native MCP hooks call this with event metadata only, never prompts or tool output. */
@@ -55,7 +55,7 @@ export async function checkBoard(db: D1Database, actor: Actor, input: unknown, t
     if (freshContext) {
       parts.push(`Room: ${JSON.stringify(room.name)}. Your agent id: ${actor.id}.`);
       parts.push(`Other agents (${Math.max(0, roster.results.length - 1)} configured; read_messages returns the full roster): ${JSON.stringify(roster.results.filter(a => a.id !== actor.id).slice(0, 10))}`);
-      parts.push('Use post_message for messages and requests, recipientId to address an agent, and replyTo to continue a discussion. All posts are room-visible. Ask the board if responsibilities are unclear. Requests remain open until the requester, intended recipient, or room owner explicitly resolves them.');
+      parts.push('All messages and requests are shared with every agent in this room. Decide which concern you based on your user’s instructions. You can name other agents in message text or ask the board who can help. Use post_message for messages and requests, and replyTo for replies. Any room participant can explicitly resolve or reopen a request; replying leaves its status unchanged.');
     }
     const instructionContext = emitInstructions
       ? room.instructions ? `\n\nOptional custom instructions (version ${room.instructions_version}):\n${room.instructions}`
@@ -68,13 +68,13 @@ export async function checkBoard(db: D1Database, actor: Actor, input: unknown, t
     let cursor = state.cursor, delivered = 0, more = false;
     if (initial) {
       const [open, recent] = await Promise.all([
-        readMessages(db, actor, 0, 8, { openOnly:true, relevantOnly:true, through }),
-        readMessages(db, actor, 0, 3, { relevantOnly:true, through, latest:true }),
+        readMessages(db, actor, 0, 8, { openOnly:true, through }),
+        readMessages(db, actor, 0, 3, { through, latest:true }),
       ]);
       context += '\n\nWelcome: currently open requests and a little recent context follow. Earlier history is available through read_messages; it will not be replayed automatically.';
       const shown = new Set<number>();
       let openCursor = 0;
-      context += '\n\nRelevant open requests:';
+      context += '\n\nOpen requests:';
       for (const message of open.messages) {
         const line = preview(message, 240);
         if (context.length + line.length > CONTEXT_LIMIT - 2200) break;
@@ -82,7 +82,7 @@ export async function checkBoard(db: D1Database, actor: Actor, input: unknown, t
       }
       if (!open.messages.length) context += ' none.';
       if (open.hasMore || shown.size < open.messages.length) {
-        context += `\nMore relevant open requests are available. Call read_messages with open_only=true, relevant_only=true, after_id=${openCursor} and continue while hasMore is true.`;
+        context += `\nMore open requests are available. Call read_messages with open_only=true, after_id=${openCursor} and continue while hasMore is true.`;
       }
       context += '\n\nRecent context:';
       for (const message of [...recent.messages].reverse()) {
@@ -93,17 +93,15 @@ export async function checkBoard(db: D1Database, actor: Actor, input: unknown, t
       }
       cursor = through;
     } else {
-      const feed = await readMessages(db, actor, state.cursor, 100, { relevantOnly:true, through });
+      const feed = await readMessages(db, actor, state.cursor, 100, { through });
       for (const message of feed.messages) {
-        if (message.author_id !== actor.id) {
-          const line = preview(message, 900);
-          if (context.length + line.length > CONTEXT_LIMIT - 250) break;
-          context += line; delivered++;
-        }
+        const line = preview(message, 900);
+        if (context.length + line.length > CONTEXT_LIMIT - 250) break;
+        context += line; delivered++;
         cursor = message.id;
       }
       more = feed.hasMore || feed.messages.some(m => m.id > cursor);
-      if (more) context += `\n\nMore board messages remain. Call read_messages with relevant_only=true, after_id=${cursor} to read them now; the next eligible hook also continues this cursor.`;
+      if (more) context += `\n\nMore board messages remain. Call read_messages with after_id=${cursor} to read them now; the next eligible hook also continues this cursor.`;
       else cursor = through;
     }
     // Commit the cursor and successful-check timestamps together, or retry both next time.

@@ -32,6 +32,7 @@ test('upgrade preserves rooms, credentials, threads, categories, scopes, and his
   assert.deepEqual(feed.messages.map(row=>row.kind),['request','message','message','message','message']);
   assert.ok(feed.messages.slice(1).every(row=>row.reply_to===10));
   assert.ok(!('claimed_by' in feed.messages[0]));
+  assert.ok(feed.messages.every(message=>!('recipient_id' in message)));
   assert.equal((await snapshot(db,owner,0,true)).openRequests,1);
   assert.equal((await postMessage(db,owner,{body:'New message'})).id,100);
   assert.throws(()=>sqlite.prepare("UPDATE messages SET status = 'claimed' WHERE id = 10").run(),/CHECK constraint/);
