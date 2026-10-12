@@ -18,6 +18,9 @@ let session = sessions.find(s => s.roomId === localStorage.getItem('patchwork.ac
 let board: Board | null = null, tab = 'board', filter = 'all', landing = 'create', page = session ? 'room' : 'welcome';
 let messages: Message[] = [], nextBefore: number | null = null, selectedAgent = '', replyTo = 0, offline = '', syncing = false;
 let pagesLoaded = 1;
+let renderedAgentIds = '';
+let cliPackage: string | null = null;
+const pairings = new Map<string, {code:string; expiresAt:string}>();
 const expandedInstructions = new Set<string>();
 const expandedResponses = new Set<string>();
 let keys = load<Record<string,string>>('patchwork.agentKeys', {}), needsKey = true, toastTimer = 0;
@@ -123,7 +126,7 @@ function connectionDetails(agent: Agent) {
   const token=keys[agent.id], url=`${location.origin}/mcp`;
   const config=connectionConfiguration(agent.client,url,token??'YOUR_AGENT_TOKEN');
   return `<div class="connection"><h3>${e(agent.name)}</h3><p class="small muted connection-activity" id="connection-state">${connectionActivity(agent)}</p>
-  ${!token?'<p class="banner">Token unavailable here. Use the original browser or replace it.</p>':''}
+  ${!token?'<p class="banner">Token stored on the connected computer or in the browser that created it. Replace it only to reconnect.</p>':''}
   <label><span>Server address</span><input readonly value="${e(url)}"></label><label><span>Agent token</span><input readonly type="password" value="${e(token??'Unavailable in this browser')}" id="agent-token"></label>
   <div class="row">${token?button('Copy token','copy-token',`data-id="${agent.id}"`,'tiny'):''}${button('Replace token','rotate-agent',`data-id="${agent.id}"`,'tiny quiet')}${!agent.revoked?button('Revoke','revoke-agent',`data-id="${agent.id}"`,'tiny quiet danger'):''}</div>
   <h3>1. Connect ${agent.client==='codex'?'Codex':agent.client==='claude'?'Claude Code':'your app'}</h3>
@@ -136,12 +139,26 @@ function connectionDetails(agent: Agent) {
 }
 function setupView() {
   const b=board!, owner=b.room.owner_id===session!.memberId, mine=b.agents.filter(a=>a.member_id===session!.memberId||owner);
+  renderedAgentIds=b.agents.map(a=>a.id).join(',');
   if (!mine.find(a=>a.id===selectedAgent)) selectedAgent=mine[0]?.id??'';
   const selected=mine.find(a=>a.id===selectedAgent);
   return `<div class="setup-grid"><div class="stack"><section class="panel"><h2>The room</h2><p class="muted">${e(b.room.name)} · ${b.members.length} participant${b.members.length===1?'':'s'}</p>
   ${owner?`<label><span>Invite teammates</span><input id="invite-link" readonly value="${e(session!.invite?`${location.origin}/#invite=${encodeURIComponent(session!.invite)}`:'Create a fresh invitation link')}" aria-label="Invitation link"></label><div class="row">${session!.invite?button('Copy invite','copy-invite','','tiny'):''}${button(session!.invite?'Replace invite':'Create invite','rotate-invite','','tiny quiet')}</div><p class="instruction">New link replaces the old one. Members keep access.</p>`:'<p class="instruction">Ask the owner for an invite.</p>'}
-  </section><section class="panel"><h2>Connect an agent</h2><form data-form="create-agent"><label><span>Agent name</span><input name="name" required maxlength="80" placeholder="${e(session!.name)} / Codex"></label><label><span>App</span><select name="client"><option value="codex">Codex</option><option value="claude">Claude Code · desktop or CLI</option><option value="other">Other MCP client</option></select></label><button class="button primary" type="submit">Create connection</button></form></section></div>
+  </section><section class="panel"><h2>Connect an agent</h2>${button('Connect Codex','pair-codex','','primary')}<div id="pairing">${pairingView()}</div>
+  <details><summary>Manual setup · Codex, Claude, other</summary><form data-form="create-agent"><label><span>Agent name</span><input name="name" required maxlength="80" placeholder="${e(session!.name)} / Codex"></label><label><span>App</span><select name="client"><option value="codex">Codex</option><option value="claude">Claude Code · desktop or CLI</option><option value="other">Other MCP client</option></select></label><button class="button" type="submit">Create connection</button></form></details></section></div>
   <section class="panel"><h2>Agent connections</h2>${mine.length?`<label><span>Agent connection</span><select id="agent-picker">${mine.map(a=>`<option value="${a.id}" ${a.id===selectedAgent?'selected':''}>${e(a.name)}${a.revoked?' (revoked)':''}</option>`).join('')}</select></label>${selected?connectionDetails(selected):''}`:'<div class="empty"><h3>Bring your first agent</h3><p>Create a connection to get started.</p></div>'}</section></div>`;
+}
+function pairingView() {
+  const pairing = pairings.get(session!.roomId);
+  if (!pairing) return '';
+  const expired = Date.now() >= Date.parse(pairing.expiresAt);
+  const command = `npx ${cliPackage ?? '@icebergsnow/patchwork-cli@0.1.0'} connect --server ${location.origin}`;
+  return `<div class="connection"><label><span>Pairing code</span><input id="pairing-code" readonly value="${expired?'Expired':e(pairing.code)}" autocomplete="off" spellcheck="false"></label>
+    <p class="instruction">${expired?'Click Connect Codex for a new code.':`Single use · expires ${e(new Date(pairing.expiresAt).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}))}. Keep it private.`}</p>
+    ${expired?'':button('Copy code','copy-pairing','','tiny')}
+    ${cliPackage?'<p class="instruction">Run in your project folder, then enter the code. Requires Node.js 22.13+ and Git.</p>':'<p class="banner">npm installer not released for this server yet. Use manual setup below. Command shown for after publication.</p>'}
+    <pre id="install-command">${e(command)}</pre>${cliPackage?button('Copy command','copy-install','','tiny'):''}
+    <p class="instruction">Restart Codex and review the new hooks when installation finishes.</p></div>`;
 }
 function render() {
   if (page==='welcome') { app.innerHTML=welcome(); return; }
@@ -178,13 +195,14 @@ async function refresh(full=false, older=false) {
       }
       pagesLoaded=loaded;
     } else pagesLoaded++;
+    const connectionsChanged = renderedAgentIds !== data.agents.map(a=>a.id).join(',');
     board=data;
     const map=new Map((older?messages:[]).map(m=>[m.id,m]));
     for(const message of data.messages) map.set(message.id,message);
     messages=Array.from(map.values());
     nextBefore=data.nextBefore;
     offline='';
-    if(full || !document.querySelector('#view')) render();
+    if(full || !document.querySelector('#view') || tab==='setup' && connectionsChanged && !document.activeElement?.matches('input,textarea,select')) render();
     else if(page==='room') {
       const active=document.activeElement;
       const editing=active?.matches('input,textarea,select');
@@ -198,6 +216,9 @@ async function refresh(full=false, older=false) {
       }
       const selected=data.agents.find(a=>a.id===selectedAgent), connection=document.querySelector('#connection-state');
       if(selected&&connection) connection.innerHTML=connectionActivity(selected);
+      if(tab==='setup') {
+        const pairing=document.querySelector('#pairing'); if(pairing&&!editing) pairing.innerHTML=pairingView();
+      }
       document.querySelector('#offline')?.setAttribute('hidden','');
       const sync=document.querySelector('#sync-state');if(sync) sync.innerHTML='<span class="dot"></span>Updated just now';
     }
@@ -227,9 +248,15 @@ app.addEventListener('click', async event=> {
     if(action==='copy-token'){await copy(keys[id]);return;}
     if(action==='copy-config'){await copy(document.querySelector('#connection-config')?.textContent??'');return;}
     if(action==='copy-hooks'){await copy(JSON.stringify(hookConfiguration(),null,2));return;}
+    if(action==='copy-pairing'){const pairing=pairings.get(session!.roomId);if(pairing&&Date.now()<Date.parse(pairing.expiresAt))await copy(pairing.code);return;}
+    if(action==='copy-install'){await copy(document.querySelector('#install-command')?.textContent??'');return;}
     if(action==='reload-instructions'){drafts.delete(`${session!.roomId}:instructions:`);await refresh(true);return;}
     target.disabled=true;
-    if(action==='rotate-invite') {
+    if(action==='pair-codex') {
+      const roomId=session!.roomId;
+      const pairing=await api<{code:string;expiresAt:string}>('/api/pairing','POST');
+      pairings.set(roomId,pairing);if(session?.roomId===roomId)render();
+    } else if(action==='rotate-invite') {
       if(session!.invite&&!confirm('Replace the invitation? The old link will stop accepting new members.'))return;
       const result=await api('/api/invite','POST');saveSession({...session!,invite:result.invite});await refresh(true);toast('Invitation ready.');
     } else if(action==='rotate-agent'||action==='revoke-agent') {
@@ -282,7 +309,7 @@ app.addEventListener('submit',async event=> {
   finally{submit.disabled=false;}
 });
 render();
-api('/api/config').then(config=>{needsKey=config.creationKeyRequired;if(page==='welcome'&&!document.activeElement?.matches('input,textarea'))render();}).catch(()=>{});
+api('/api/config').then(config=>{needsKey=config.creationKeyRequired;cliPackage=config.cliPackage??null;if(!document.activeElement?.matches('input,textarea'))render();}).catch(()=>{});
 if(page==='room') void refresh(true);
 window.setInterval(()=>{if(page==='room'&&document.visibilityState==='visible')void refresh();},5000);
 document.addEventListener('visibilitychange',()=>{if(page==='room'&&document.visibilityState==='visible')void refresh();});

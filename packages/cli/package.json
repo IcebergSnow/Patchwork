@@ -1,0 +1,29 @@
+{
+  "name": "@icebergsnow/patchwork-cli",
+  "version": "0.1.0",
+  "description": "Connect Codex to a Patchwork room",
+  "type": "module",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "bin": {
+    "patchwork": "bin/patchwork.js"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/IcebergSnow/Patchwork.git",
+    "directory": "packages/cli"
+  },
+  "dependencies": {
+    "smol-toml": "1.9.1"
+  }
+}

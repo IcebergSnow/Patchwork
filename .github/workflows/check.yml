@@ -16,3 +16,19 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: npm run test:e2e
+      - run: npm pack --workspace packages/cli --dry-run
+  installer:
+    strategy:
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: node --import tsx --test tests/cli.test.ts
+      - run: npm pack --workspace packages/cli --dry-run

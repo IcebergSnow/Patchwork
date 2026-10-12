@@ -8,8 +8,9 @@ import {
 } from './domain';
 import { checkBoard, hookSchema } from './hooks';
 import { AGENT_INSTRUCTIONS } from './agent-instructions';
+import { createPairing, redeemPairing } from './pairing';
 
-export interface Env { DB: D1Database; ASSETS: Fetcher; ROOM_CREATION_KEY?: string }
+export interface Env { DB: D1Database; ASSETS: Fetcher; ROOM_CREATION_KEY?: string; PATCHWORK_CLI_PACKAGE?: string }
 const json = (data: unknown, status = 200) => Response.json(data, { status, headers: { 'Cache-Control': 'no-store' } });
 const isLocal = (url: URL) => ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
 
@@ -98,7 +99,12 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
       allowedHostnames: [url.hostname], allowedOriginHostnames: [url.hostname],
     })(bounded, env, ctx);
   }
-  if (request.method === 'GET' && path === '/api/config') return json({ creationKeyRequired: !!env.ROOM_CREATION_KEY || !isLocal(url) });
+  if (request.method === 'GET' && path === '/api/config') return json({
+    creationKeyRequired: !!env.ROOM_CREATION_KEY || !isLocal(url),
+    // Host opts in only after publishing and verifying this exact npm version.
+    cliPackage: /^@[a-z0-9-]+\/patchwork-cli@\d+\.\d+\.\d+$/.test(env.PATCHWORK_CLI_PACKAGE ?? '') ? env.PATCHWORK_CLI_PACKAGE : null,
+  });
+  if (request.method === 'POST' && path === '/api/pairing/redeem') return json(await redeemPairing(env.DB, await body(request)), 201);
   if (request.method === 'POST' && path === '/api/rooms') {
     const data = parse(createRoomSchema, await body(request));
     if (!env.ROOM_CREATION_KEY && !isLocal(url)) throw new HttpError(503, 'The host must configure ROOM_CREATION_KEY before creating rooms.');
@@ -107,6 +113,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   }
   if (request.method === 'POST' && path === '/api/join') return json(await joinRoom(env.DB, await body(request)), 201);
   const actor = await authenticate(env.DB, request.headers.get('Authorization'), 'member');
+  if (request.method === 'POST' && path === '/api/pairing') return json(await createPairing(env.DB, actor), 201);
   if (request.method === 'GET' && path === '/api/board') return json(await snapshot(env.DB, actor, integer(url.searchParams.get('before'), 0), parse(z.enum(['all', 'open', 'intervention']), url.searchParams.get('filter') ?? 'all')));
   if (request.method === 'POST' && path === '/api/invite') return json(await rotateInvite(env.DB, actor));
   if (request.method === 'POST' && path === '/api/agents') return json(await createAgent(env.DB, actor, await body(request)), 201);

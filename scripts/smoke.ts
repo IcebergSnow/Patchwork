@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { execFileSync } from 'node:child_process';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { connect } from '../packages/cli/lib/connect.js';
 
 const base = new URL(process.env.PATCHWORK_BASE_URL || 'http://127.0.0.1:8787');
 if (!['localhost','127.0.0.1','[::1]'].includes(base.hostname)) throw new Error('Smoke tests create fixtures. Use a local preview.');
@@ -16,8 +21,20 @@ assert.equal(page.headers.get('X-Content-Type-Options'),'nosniff');
 const created=await request('/api/rooms','POST',{name:'Integration smoke test',memberName:'Smoke owner',creationKey:process.env.ROOM_CREATION_KEY});
 assert.equal(created.status,201,JSON.stringify(created.body));
 const member=created.body.token;
-const connection=await request('/api/agents','POST',{name:'Smoke agent',client:'codex'},member);
-assert.equal(connection.status,201);
+assert.equal((await request('/api/pairing','POST')).status,401);
+const pairing=await request('/api/pairing','POST',{},member);
+assert.equal(pairing.status,201);
+const project=await mkdtemp(path.join(tmpdir(),'patchwork-install-smoke-'));
+let connection: {body:{id:string;token:string}};
+try {
+  execFileSync('git',['init','--quiet',project]);
+  const installed=await connect({cwd:project,server:base.origin,pairingCode:async()=>pairing.body.code,log:()=>{}});
+  const repeated=await connect({cwd:project,server:base.origin,pairingCode:async()=>{throw new Error('Repeat must reuse connection');},log:()=>{}});
+  assert.equal(installed.id,repeated.id);
+  connection={body:JSON.parse(await readFile(path.join(project,'.codex','patchwork.json'),'utf8'))};
+  assert.equal((await request('/api/pairing/redeem','POST',{code:pairing.body.code})).status,400);
+  assert.equal((await request('/api/board','GET',undefined,member)).body.agents.length,1);
+} finally { await rm(project,{recursive:true,force:true}); }
 const agent=connection.body.token;
 const peerConnection=await request('/api/agents','POST',{name:'Second agent',client:'claude'},member);
 assert.equal(peerConnection.status,201);

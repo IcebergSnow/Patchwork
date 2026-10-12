@@ -59,3 +59,19 @@ test('acknowledgment migration leaves messages, instructions, and hook cursors i
   assert.equal((await snapshot(db,owner)).needsHumanIntervention,1);
   assert.deepEqual(sqlite.prepare('PRAGMA foreign_key_check').all(),[]);
 });
+
+test('pairing migration preserves every existing table and its rows', async () => {
+  const {db,sqlite} = database(4);
+  const credentials = await createRoom(db,{name:'Existing board',memberName:'Owner'});
+  const owner = await authenticate(db,`Bearer ${credentials.token}`,'member');
+  const connection = await createAgent(db,owner,{name:'Existing agent'});
+  const request = await postMessage(db,owner,{body:'Keep this request',kind:'request'});
+  const actor = await authenticate(db,`Bearer ${connection.token}`,'agent');
+  await acknowledgeRequest(db,actor,{request_id:request.id,response:'need_clarification'});
+  sqlite.prepare('INSERT INTO hook_sessions (agent_id,session_hash,cursor,lease_id) VALUES (?,?,?,?)').run(connection.id,'existing',request.id,'existing-lease');
+  const tables = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(row=>String(row.name));
+  const before = tables.map(table=>sqlite.prepare(`SELECT * FROM ${table}`).all());
+  sqlite.exec(readFileSync(new URL('../migrations/0005_pairing.sql',import.meta.url),'utf8'));
+  tables.forEach((table,i)=>assert.deepEqual(sqlite.prepare(`SELECT * FROM ${table}`).all(),before[i]));
+  assert.deepEqual(sqlite.prepare('PRAGMA foreign_key_check').all(),[]);
+});
