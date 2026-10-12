@@ -218,7 +218,20 @@ export class GitHub {
       "X-GitHub-Api-Version: 2022-11-28",
       endpoint,
     ];
-    if (cached?.etag) args.push("-H", `If-None-Match: ${cached.etag}`);
+    // A full terminal page can gain a next link without changing its body.
+    // A body-only ETag/304 must not freeze that pagination boundary forever.
+    const pageSize =
+      Number(
+        new URL(endpoint, "https://api.github.com").searchParams.get(
+          "per_page",
+        ),
+      ) || 30;
+    const fullTerminalPage =
+      Array.isArray(cached?.value) &&
+      cached.value.length >= pageSize &&
+      !cached.next;
+    if (cached?.etag && !fullTerminalPage)
+      args.push("-H", `If-None-Match: ${cached.etag}`);
     let raw;
     try {
       raw = await this.send(args, undefined, "GET");

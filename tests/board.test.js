@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { FakeGitHub, connection } from "./fixtures.js";
+import { FakeGitHub, connection, restClient } from "./fixtures.js";
 import {
   createBoard,
   findBoard,
@@ -207,6 +207,20 @@ test("conditional pagination reuses 304 bodies, follows changed links, and rejec
       'HTTP/2.0 200 OK\nLink: <https://evil.example/page>; rel="next"\n\n[]',
   );
   await assert.rejects(foreign.list("/issues"), /pagination link/);
+});
+
+test("an unchanged full terminal page cannot hide a newly added page", async () => {
+  const remote = new FakeGitHub();
+  await createBoard(remote);
+  for (let i = 0; i < 100; i++)
+    await remote.api("POST", "/issues/1/comments", { body: `Message ${i}` });
+  const gh = restClient(remote);
+  assert.equal((await gh.list("/issues/1/comments")).length, 100);
+  // Page one's body and ETag stay identical; only its pagination link changes.
+  await remote.api("POST", "/issues/1/comments", { body: "New page" });
+  const comments = await gh.list("/issues/1/comments");
+  assert.equal(comments.length, 101);
+  assert.equal(comments.at(-1).body, "New page");
 });
 
 test("rate-limit headers preserve the server retry deadline without leaking error bodies", async () => {
