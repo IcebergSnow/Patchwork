@@ -1,0 +1,34 @@
+{
+  "name": "patchwork",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.13.0" },
+  "scripts": {
+    "dev": "npm run build:web && npm run db:local && wrangler dev --ip 127.0.0.1 --port 8787",
+    "build:web": "vite build",
+    "watch:web": "vite build --watch",
+    "build": "npm run typecheck && npm run build:web && wrangler deploy --dry-run --outdir dist/worker",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "test:integration": "node --import tsx scripts/smoke.ts",
+    "test:e2e": "node scripts/check.mjs",
+    "db:local": "wrangler d1 migrations apply patchwork --local",
+    "db:remote": "wrangler d1 migrations apply patchwork --remote",
+    "deploy": "npm run build && wrangler deploy"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.0.0",
+    "agents": "0.28.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261011.1",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0",
+    "vite": "8.3.4",
+    "wrangler": "4.149.0"
+  }
+}
