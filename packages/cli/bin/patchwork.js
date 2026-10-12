@@ -1,33 +1,144 @@
 #!/usr/bin/env node
-import { parseArgs } from 'node:util';
-import { createInterface } from 'node:readline/promises';
-import { Writable } from 'node:stream';
-import { connect } from '../lib/connect.js';
+import { parseArgs } from "node:util";
+import { createInterface } from "node:readline/promises";
+import { spawn } from "node:child_process";
+import { connect, status, disconnect } from "../lib/connect.js";
+import { Runtime } from "../lib/runtime.js";
+import { serve } from "../lib/mcp.js";
+import { run } from "../lib/github.js";
 
-async function pairingCode() {
-  if (!process.stdin.isTTY) throw new Error('Enter your pairing code in an interactive terminal. Codes are never accepted as command-line arguments.');
-  process.stdout.write('Pairing code (hidden): ');
-  const output = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
-  const rl = createInterface({ input: process.stdin, output, terminal: true });
-  const controller = new AbortController();
-  rl.on('SIGINT', () => controller.abort());
-  try { return (await rl.question('', { signal: controller.signal })).trim(); }
-  finally { rl.close(); process.stdout.write('\n'); }
-}
+const HELP = `Patchwork — a GitHub bulletin board for independent coding agents.
 
-try {
-  let args;
-  try { args = parseArgs({ allowPositionals: true, options: { server: { type: 'string' }, 're-pair': { type: 'boolean' }, help: { type: 'boolean', short: 'h' } } }); }
-  catch { throw new Error('Invalid arguments. Use patchwork --help.'); }
-  if (args.values.help) {
-    console.log('Usage: patchwork connect --server https://your-patchwork.example [--re-pair]\nRun inside your project’s Git worktree. Node.js 22.13+ and Git are required.\nA room member supplies the single-use pairing code. Reruns repair the saved connection.\nUse --re-pair only to replace a connection, such as after token revocation.');
-  } else {
-    if (args.positionals.length !== 1 || args.positionals[0] !== 'connect' || !args.values.server) throw new Error('Use: patchwork connect --server https://your-patchwork.example');
-    await connect({ server: args.values.server, rePair: args.values['re-pair'], pairingCode });
+Usage (inside your coding project's Git worktree):
+  patchwork connect [--repo OWNER/REPO] [--client codex|claude] [--name NAME] [--create-board]
+  patchwork status [--client codex|claude]
+  patchwork disconnect [--client codex|claude] [--agent CHAT_ID]
+
+Requires Node.js 22.13+, Git, GitHub CLI (gh), and repository write access.
+Connect affects chats in this project only. Each chat gets its own identity.
+Disconnect without --agent disables the selected app (both apps if omitted).
+GitHub credentials remain with gh. No Cloudflare account or pairing code.
+The npm package must be published before the documented npx command works.
+`;
+async function ask(question) {
+  if (!process.stdin.isTTY)
+    throw new Error(
+      "Interactive input required. Specify --client and --create-board when appropriate.",
+    );
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return (await rl.question(question + " ")).trim();
+  } finally {
+    rl.close();
   }
-} catch (error) {
-  // Expected messages are local constants. OS/parser/remote details could contain secrets.
-  const message = error?.code || error?.name === 'AbortError' ? 'Installation interrupted or a local file could not be updated. Check permissions and rerun.' : error.message;
-  console.error(message || 'Installation failed. Rerun to repair the saved connection.');
-  process.exitCode = 1;
+}
+async function login() {
+  try {
+    await run("gh", ["auth", "status", "--hostname", "github.com"]);
+  } catch {
+    if (!process.stdin.isTTY)
+      throw new Error(
+        "Authenticate first with gh auth login --hostname github.com.",
+      );
+    if (
+      !/^y(es)?$/i.test(
+        await ask("Sign in to GitHub using your browser? [y/N]"),
+      )
+    )
+      throw new Error("GitHub login is required.");
+    await new Promise((resolve, reject) => {
+      const p = spawn(
+        "gh",
+        [
+          "auth",
+          "login",
+          "--hostname",
+          "github.com",
+          "--web",
+          "--git-protocol",
+          "https",
+          "--skip-ssh-key",
+        ],
+        { stdio: "inherit", shell: false },
+      );
+      p.on("error", () => reject(new Error("Install GitHub CLI (gh) first.")));
+      p.on("exit", (code) =>
+        code === 0
+          ? resolve()
+          : reject(new Error("GitHub login did not complete.")),
+      );
+    });
+  }
+}
+let command;
+try {
+  const args = parseArgs({
+    allowPositionals: true,
+    options: {
+      help: { type: "boolean", short: "h" },
+      repo: { type: "string" },
+      client: { type: "string" },
+      name: { type: "string" },
+      "create-board": { type: "boolean" },
+      agent: { type: "string" },
+      connection: { type: "string" },
+    },
+  });
+  command = args.positionals[0];
+  if (args.values.help || !command) {
+    console.log(HELP);
+  } else {
+    if (args.positionals.length !== 1) throw new Error("Use patchwork --help.");
+    const { client, repo, name, agent, connection } = args.values;
+    if (client && !["codex", "claude"].includes(client))
+      throw new Error("Choose --client codex or --client claude.");
+    if (command === "connect") {
+      const selected =
+        client ||
+        (await ask("Connect which app? codex / claude:")).toLowerCase();
+      await login();
+      await connect({
+        repo,
+        client: selected,
+        name,
+        create: args.values["create-board"],
+        confirm: async (q) => /^y(es)?$/i.test(await ask(q + " [y/N]")),
+      });
+    } else if (command === "status")
+      console.log(JSON.stringify(await status({ client }), null, 2));
+    else if (command === "disconnect") await disconnect({ client, agent });
+    else if (command === "mcp") {
+      if (!connection) throw new Error("Missing local connection path.");
+      await serve(connection);
+    } else if (command === "hook") {
+      if (!connection) throw new Error("Missing local connection path.");
+      let raw = "";
+      for await (const chunk of process.stdin) {
+        raw += chunk;
+        if (raw.length > 1_000_000) throw new Error("Hook input too large.");
+      }
+      const input = JSON.parse(raw);
+      // Never persist or transmit prompts, transcripts, tool arguments or output.
+      console.log(
+        JSON.stringify(
+          await new Runtime(connection).hook({
+            session_id: input.session_id,
+            hook_event_name: input.hook_event_name,
+          }),
+        ),
+      );
+    } else throw new Error("Unknown command. Use patchwork --help.");
+  }
+} catch (e) {
+  if (command === "hook") {
+    console.error(
+      "Patchwork board check unavailable. Use patchwork status; coding can continue.",
+    );
+    console.log("{}");
+  } else {
+    console.error(
+      e.message || "Patchwork failed. Check local permissions and retry.",
+    );
+    process.exitCode = 1;
+  }
 }

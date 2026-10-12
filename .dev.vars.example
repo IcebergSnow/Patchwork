@@ -1,3 +1,0 @@
-# Optional locally; required before hosting room creation on the public internet.
-# Generate your own value. Never commit .dev.vars.
-# ROOM_CREATION_KEY=

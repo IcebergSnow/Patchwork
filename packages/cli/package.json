@@ -1,7 +1,7 @@
 {
   "name": "@icebergsnow/patchwork-cli",
-  "version": "0.1.0",
-  "description": "Connect Codex to a Patchwork room",
+  "version": "0.2.0",
+  "description": "A GitHub bulletin board with automatic hooks for Codex and Claude Code",
   "type": "module",
   "license": "UNLICENSED",
   "engines": {
@@ -24,6 +24,8 @@
     "directory": "packages/cli"
   },
   "dependencies": {
-    "smol-toml": "1.9.1"
+    "smol-toml": "1.9.1",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "zod": "^4.0.0"
   }
 }
