@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { database } from './database';
 import {
   authenticate, createAgent, createRoom, joinRoom, postMessage, readMessages, requestAction,
-  rotateAgent, rotateInvite, snapshot, reportStatus, setMerger, reportIntegration, HttpError,
+  rotateAgent, rotateInvite, snapshot, saveInstructions, updateAgent, HttpError,
 } from '../src/domain';
 
 async function fixture() {
@@ -86,23 +86,47 @@ test('revocation and rotation invalidate old credentials without removing histor
   assert.equal((await authenticate(db,`Bearer ${credentials.token}`,'member')).id,owner.id);
 });
 
-test('status has provenance and only the merge owner can report integration',async()=>{
+test('only the owner edits instructions and stale edits cannot overwrite newer text',async()=>{
+  const {db,owner,credentials}=await fixture();
+  const joined=await joinRoom(db,{name:'Bob',invite:credentials.invite});
+  const bob=await authenticate(db,`Bearer ${joined.token}`,'member');
+  await assert.rejects(saveInstructions(db,bob,{instructions:'Take over',version:0}),errorStatus(403));
+  const updated=await saveInstructions(db,owner,{instructions:'Run tests before pushing.',version:0});
+  assert.equal(updated.instructions_version,1);
+  await assert.rejects(saveInstructions(db,owner,{instructions:'Stale',version:0}),errorStatus(409));
+  const fresh=await authenticate(db,`Bearer ${credentials.token}`,'member');
+  const state=await snapshot(db,fresh);
+  assert.equal(state.room.instructions,'Run tests before pushing.');
+  assert.ok(!('integration' in state));assert.ok(!('merger_id' in state.room));
+  await saveInstructions(db,owner,{instructions:'',version:1});
+});
+
+test('directed messages stay room-visible and replies retain their recipient',async()=>{
   const {db,owner}=await fixture();
-  const one=await createAgent(db,owner,{name:'Integrator',client:'codex',scope:'integration'});
-  const two=await createAgent(db,owner,{name:'Frontend',client:'claude',scope:'ui/'});
-  await setMerger(db,owner,one.id);
-  const merger=await authenticate(db,`Bearer ${one.token}`,'agent');
-  const frontend=await authenticate(db,`Bearer ${two.token}`,'agent');
-  await reportStatus(db,frontend,{status:'ready',branch:'feature/ui',headCommit:'a123456',baseCommit:'b123456',summary:'PR ready'});
-  const report={commit:'abc1234',status:'passed',summary:'Build and signup smoke test passed.'};
-  await assert.rejects(reportIntegration(db,frontend,report),errorStatus(403));
-  await reportIntegration(db,merger,report);
-  const state=await snapshot(db,owner);
-  assert.equal((state.integration as any).source,'agent');
-  assert.equal((state.integration as any).commit_sha,'abc1234');
-  assert.equal(state.agents.find(a=>a.id===two.id)!.status,'ready');
-  assert.ok(state.agents.find(a=>a.id===two.id)!.reported_at);
-  await assert.rejects(reportStatus(db,frontend,{status:'ready',headCommit:'not-a-commit'}),errorStatus(400));
+  const one=await createAgent(db,owner,{name:'Frontend',client:'codex',scope:'ui/'});
+  const two=await createAgent(db,owner,{name:'Backend',client:'claude',scope:'api/'});
+  const frontend=await authenticate(db,`Bearer ${one.token}`,'agent');
+  const backend=await authenticate(db,`Bearer ${two.token}`,'agent');
+  const root=await postMessage(db,frontend,{body:'Need ownerName',kind:'request',recipientId:two.id});
+  const reply=await postMessage(db,backend,{body:'On it',replyTo:root.id});
+  assert.equal(reply.recipient_id,two.id);
+  assert.equal((await readMessages(db,owner)).messages[0].recipient_id,two.id);
+  await assert.rejects(postMessage(db,frontend,{body:'Redirect',replyTo:root.id,recipientId:one.id}),errorStatus(400));
+  const other=await createRoom(db,{name:'Other',memberName:'Other'});
+  const otherOwner=await authenticate(db,`Bearer ${other.token}`,'member');
+  await assert.rejects(postMessage(db,otherOwner,{body:'Cross room',recipientId:two.id}),errorStatus(400));
+  await rotateAgent(db,owner,two.id,true);
+  await assert.rejects(postMessage(db,owner,{body:'Revoked target',recipientId:two.id}),errorStatus(400));
+});
+
+test('participants can edit their own scopes and the room owner can manage scopes',async()=>{
+  const {db,owner,credentials}=await fixture();
+  const joined=await joinRoom(db,{name:'Bob',invite:credentials.invite});
+  const bob=await authenticate(db,`Bearer ${joined.token}`,'member');
+  const one=await createAgent(db,owner,{name:'Agent',client:'codex',scope:'ui/'});
+  await assert.rejects(updateAgent(db,bob,one.id,{scope:'backend/'}),errorStatus(403));
+  await updateAgent(db,owner,one.id,{scope:'frontend/'});
+  assert.equal((await snapshot(db,owner)).agents[0].scope,'frontend/');
 });
 
 test('message cursors and older threads retain replies and pending requests',async()=>{

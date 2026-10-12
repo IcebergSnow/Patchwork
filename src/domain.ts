@@ -2,11 +2,8 @@ import { z } from 'zod';
 
 const name = z.string().trim().min(1).max(80);
 const text = z.string().trim().min(1).max(8000);
-const commit = z.string().regex(/^[a-fA-F0-9]{7,64}$/, 'Use a Git commit hash.');
-const optionalCommit = z.union([commit, z.literal('')]).default('');
 export const clientSchema = z.enum(['codex', 'claude', 'other']);
-export const kindSchema = z.enum(['note', 'request', 'update', 'ready', 'integration']);
-export const statusSchema = z.enum(['idle', 'working', 'blocked', 'ready', 'integrating']);
+export const kindSchema = z.enum(['note', 'request', 'update']);
 const repository = z.string().trim().max(500).default('').refine(value => {
   if (!value) return true;
   try { const url = new URL(value); return url.protocol === 'https:' && !url.username && !url.password; }
@@ -14,39 +11,29 @@ const repository = z.string().trim().max(500).default('').refine(value => {
 }, 'Use an HTTPS repository URL.');
 export const createRoomSchema = z.object({
   name, memberName: name, repository,
-  baseBranch: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,99}$/).default('main'),
   creationKey: z.string().max(500).optional(),
 });
 export const joinSchema = z.object({ name, invite: z.string().min(20).max(200) });
 export const agentSchema = z.object({ name, client: clientSchema, scope: z.string().trim().min(1).max(2000) });
+export const instructionsSchema = z.object({ instructions: z.string().trim().max(4000), version: z.number().int().nonnegative() });
 export const postSchema = z.object({
   body: text, kind: kindSchema.default('note'), replyTo: z.number().int().positive().optional(),
+  recipientId: z.string().uuid().nullable().optional(),
 }).refine(data => !(data.replyTo && data.kind === 'request'), 'Start a new thread for a request.');
-export const reportSchema = z.object({
-  status: statusSchema,
-  summary: z.string().trim().max(2000).default(''),
-  branch: z.string().trim().max(200).default(''),
-  headCommit: optionalCommit,
-  baseCommit: optionalCommit,
-  scope: z.string().trim().min(1).max(2000).optional(),
-});
-export const integrationSchema = z.object({
-  commit, status: z.enum(['running', 'passed', 'failed']), summary: z.string().trim().min(1).max(4000),
-});
 export type Room = {
   id: string; name: string; repository: string; base_branch: string; owner_id: string;
   invite_hash: string; merger_id: string | null; created_at: string;
+  instructions: string; instructions_version: number;
 };
 export type Actor = { id: string; name: string; kind: 'member' | 'agent'; room: Room; memberId?: string };
 export type Message = {
   id: number; room_id: string; author_id: string; author_name: string; author_type: 'member' | 'agent';
-  kind: z.infer<typeof kindSchema>; body: string; reply_to: number | null;
+  kind: z.infer<typeof kindSchema> | 'ready' | 'integration'; body: string; reply_to: number | null; recipient_id: string | null;
   status: 'open' | 'claimed' | 'resolved' | null; claimed_by: string | null; claimed_name: string | null; created_at: string;
 };
 export type Agent = {
   id: string; room_id: string; member_id: string; name: string; client: z.infer<typeof clientSchema>;
-  scope: string; branch: string; head_commit: string; base_commit: string; status: z.infer<typeof statusSchema>;
-  summary: string; last_seen_at: string | null; reported_at: string | null; revoked: number; created_at: string;
+  scope: string; last_seen_at: string | null; last_hook_at: string | null; revoked: number; created_at: string;
 };
 export class HttpError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -57,7 +44,7 @@ export function parse<T>(schema: z.ZodType<T>, input: unknown): T {
   return result.data;
 }
 export function publicRoom(room: Room) {
-  const { invite_hash: _private, ...safe } = room;
+  const { invite_hash: _private, merger_id: _merger, base_branch: _branch, ...safe } = room;
   return safe;
 }
 export function secret(type: 'm' | 'a' | 'i'): string {
@@ -91,8 +78,8 @@ export async function createRoom(db: D1Database, input: unknown) {
   const data = parse(createRoomSchema, input);
   const id = crypto.randomUUID(), memberId = crypto.randomUUID(), token = secret('m'), invite = secret('i'), time = now();
   await db.batch([
-    db.prepare('INSERT INTO rooms (id, name, repository, base_branch, owner_id, invite_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .bind(id, data.name, data.repository, data.baseBranch, memberId, await hash(invite), time),
+    db.prepare('INSERT INTO rooms (id, name, repository, owner_id, invite_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .bind(id, data.name, data.repository, memberId, await hash(invite), time),
     db.prepare('INSERT INTO members (id, room_id, name, token_hash, created_at) VALUES (?, ?, ?, ?, ?)')
       .bind(memberId, id, data.memberName, await hash(token), time),
     db.prepare('INSERT INTO events (room_id, actor_name, kind, summary, created_at) VALUES (?, ?, ?, ?, ?)')
@@ -130,27 +117,42 @@ export async function rotateAgent(db: D1Database, actor: Actor, id: string, revo
   if (!row) throw new HttpError(404, 'Agent not found.');
   if (actor.kind !== 'member' || (actor.id !== row.member_id && actor.id !== actor.room.owner_id)) throw new HttpError(403, 'Only this participant or the room owner can manage the connection.');
   const token = revoke ? null : secret('a');
-  await db.prepare('UPDATE agents SET token_hash = ?, revoked = ?, last_seen_at = NULL WHERE id = ? AND room_id = ?')
+  await db.prepare('UPDATE agents SET token_hash = ?, revoked = ?, last_seen_at = NULL, last_hook_at = NULL WHERE id = ? AND room_id = ?')
     .bind(token ? await hash(token) : null, revoke ? 1 : 0, id, actor.room.id).run();
   await event(db, actor, 'agent', revoke ? 'Revoked an agent connection.' : 'Replaced an agent access token.');
   return { token };
 }
-export async function setMerger(db: D1Database, actor: Actor, id: string | null) {
+export async function saveInstructions(db: D1Database, actor: Actor, input: unknown) {
   requireOwner(actor);
-  if (id && !(await db.prepare('SELECT id FROM agents WHERE id = ? AND room_id = ? AND revoked = 0').bind(id, actor.room.id).first())) throw new HttpError(400, 'Choose an active agent from this room.');
-  await db.prepare('UPDATE rooms SET merger_id = ? WHERE id = ?').bind(id, actor.room.id).run();
-  await event(db, actor, 'integration', id ? 'Designated the merge owner.' : 'Cleared the merge owner.');
+  const data = parse(instructionsSchema, input);
+  const updated = await db.prepare('UPDATE rooms SET instructions = ?, instructions_version = instructions_version + 1 WHERE id = ? AND instructions_version = ? RETURNING instructions, instructions_version')
+    .bind(data.instructions, actor.room.id, data.version).first<{instructions:string; instructions_version:number}>();
+  if (!updated) throw new HttpError(409, 'Instructions changed in another window. Reload the saved instructions before editing again.');
+  await event(db, actor, 'instructions', data.instructions ? 'Updated custom instructions.' : 'Cleared custom instructions.');
+  return updated;
+}
+export async function updateAgent(db: D1Database, actor: Actor, id: string, input: unknown) {
+  const data = parse(z.object({ scope: agentSchema.shape.scope }), input);
+  const row = await db.prepare('SELECT member_id FROM agents WHERE id = ? AND room_id = ? AND revoked = 0').bind(id, actor.room.id).first<{member_id:string}>();
+  if (!row) throw new HttpError(404, 'Agent not found.');
+  if (actor.kind !== 'member' || (actor.id !== row.member_id && actor.id !== actor.room.owner_id)) throw new HttpError(403, 'Only this participant or the room owner can edit the scope.');
+  await db.prepare('UPDATE agents SET scope = ? WHERE id = ? AND room_id = ?').bind(data.scope, id, actor.room.id).run();
+  return { ok: true };
 }
 export async function postMessage(db: D1Database, actor: Actor, input: unknown) {
   const data = parse(postSchema, input);
-  let parent: number | null = null;
+  let parent: number | null = null, recipient = data.recipientId ?? null;
   if (data.replyTo) {
-    const message = await db.prepare('SELECT id, reply_to FROM messages WHERE id = ? AND room_id = ?').bind(data.replyTo, actor.room.id).first<{ id: number; reply_to: number | null }>();
+    const message = await db.prepare('SELECT id, reply_to, recipient_id FROM messages WHERE id = ? AND room_id = ?').bind(data.replyTo, actor.room.id).first<Pick<Message, 'id' | 'reply_to' | 'recipient_id'>>();
     if (!message) throw new HttpError(404, 'Thread not found in this room.');
     parent = message.reply_to ?? message.id;
+    if (data.recipientId !== undefined && data.recipientId !== message.recipient_id) throw new HttpError(400, 'Replies keep the thread’s recipient.');
+    recipient = message.recipient_id;
+  } else if (recipient && !(await db.prepare('SELECT id FROM agents WHERE id = ? AND room_id = ? AND revoked = 0').bind(recipient, actor.room.id).first())) {
+    throw new HttpError(400, 'Choose an active agent in this room.');
   }
-  const message = await db.prepare('INSERT INTO messages (room_id, author_id, author_name, author_type, kind, body, reply_to, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *')
-    .bind(actor.room.id, actor.id, actor.name, actor.kind, data.kind, data.body, parent, data.kind === 'request' ? 'open' : null, now()).first<Message>();
+  const message = await db.prepare('INSERT INTO messages (room_id, author_id, author_name, author_type, kind, body, reply_to, status, created_at, recipient_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *')
+    .bind(actor.room.id, actor.id, actor.name, actor.kind, data.kind, data.body, parent, data.kind === 'request' ? 'open' : null, now(), recipient).first<Message>();
   await event(db, actor, 'message', `${parent ? `Replied to #${parent}` : `Posted ${data.kind} #${message!.id}`}.`);
   return message!;
 }
@@ -173,22 +175,6 @@ export async function requestAction(db: D1Database, actor: Actor, id: number, ac
   await postMessage(db, actor, { body: action === 'claim' ? `Claimed this request: ${actor.name}.` : action === 'resolve' ? 'Marked this request resolved.' : 'Reopened this request.', kind: 'update', replyTo: id });
   return updated!;
 }
-export async function reportStatus(db: D1Database, actor: Actor, input: unknown) {
-  if (actor.kind !== 'agent') throw new HttpError(403, 'Status must come from the agent connection.');
-  const data = parse(reportSchema, input), time = now();
-  await db.prepare('UPDATE agents SET status = ?, summary = ?, branch = ?, head_commit = ?, base_commit = ?, scope = COALESCE(?, scope), reported_at = ?, last_seen_at = ? WHERE id = ? AND room_id = ?')
-    .bind(data.status, data.summary, data.branch, data.headCommit, data.baseCommit, data.scope ?? null, time, time, actor.id, actor.room.id).run();
-  await event(db, actor, 'status', `${data.status}${data.branch ? ` on ${data.branch}` : ''}${data.summary ? `: ${data.summary}` : ''}`);
-  return { reportedAt: time };
-}
-export async function reportIntegration(db: D1Database, actor: Actor, input: unknown) {
-  if (actor.kind === 'agent' ? actor.id !== actor.room.merger_id : actor.id !== actor.room.owner_id) throw new HttpError(403, 'Only the designated merge agent or room owner can report integration checks.');
-  const data = parse(integrationSchema, input), time = now();
-  await db.prepare('INSERT INTO integrations (room_id, commit_sha, status, summary, reported_by, reported_at, source) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(room_id) DO UPDATE SET commit_sha = excluded.commit_sha, status = excluded.status, summary = excluded.summary, reported_by = excluded.reported_by, reported_at = excluded.reported_at, source = excluded.source')
-    .bind(actor.room.id, data.commit, data.status, data.summary, actor.name, time, actor.kind).run();
-  await postMessage(db, actor, { kind: 'integration', body: `${actor.room.base_branch} @ ${data.commit} — ${data.status}\n${data.summary}` });
-  return { reportedAt: time };
-}
 export async function readMessages(db: D1Database, actor: Actor, after = 0, limit = 100) {
   const rows = await db.prepare('SELECT * FROM messages WHERE room_id = ? AND id > ? ORDER BY id ASC LIMIT ?').bind(actor.room.id, after, limit + 1).all<Message>();
   const messages = rows.results.slice(0, limit);
@@ -199,14 +185,12 @@ export async function snapshot(db: D1Database, actor: Actor, before = 0, openOnl
     .bind(...(before ? [actor.room.id, before] : [actor.room.id])).all<Message>();
   const selected = roots.results.slice(0, 30), ids = selected.map(m => m.id);
   const replies = ids.length ? (await db.prepare(`SELECT * FROM messages WHERE room_id = ? AND reply_to IN (${ids.map(() => '?').join(',')}) ORDER BY id ASC`).bind(actor.room.id, ...ids).all<Message>()).results : [];
-  const [agents, members, events, integration, count] = await Promise.all([
-    db.prepare('SELECT id, room_id, member_id, name, client, scope, branch, head_commit, base_commit, status, summary, last_seen_at, reported_at, revoked, created_at FROM agents WHERE room_id = ? ORDER BY created_at').bind(actor.room.id).all<Agent>(),
+  const [agents, members, count] = await Promise.all([
+    db.prepare('SELECT id, room_id, member_id, name, client, scope, last_seen_at, last_hook_at, revoked, created_at FROM agents WHERE room_id = ? ORDER BY created_at').bind(actor.room.id).all<Agent>(),
     db.prepare('SELECT id, name FROM members WHERE room_id = ? ORDER BY created_at').bind(actor.room.id).all<{id:string;name:string}>(),
-    db.prepare('SELECT id, actor_name, kind, summary, created_at FROM events WHERE room_id = ? ORDER BY id DESC LIMIT 100').bind(actor.room.id).all(),
-    db.prepare('SELECT * FROM integrations WHERE room_id = ?').bind(actor.room.id).first(),
     db.prepare("SELECT COUNT(*) AS count FROM messages WHERE room_id = ? AND kind = 'request' AND status != 'resolved'").bind(actor.room.id).first<{count:number}>(),
   ]);
   return { room: publicRoom(actor.room), me: {id:actor.id,name:actor.name,kind:actor.kind}, agents: agents.results,
-    members: members.results, events: events.results, integration, openRequests: count?.count ?? 0,
+    members: members.results, openRequests: count?.count ?? 0,
     messages: [...selected, ...replies], nextBefore: roots.results.length > 30 ? selected.at(-1)!.id : null, serverTime: now() };
 }

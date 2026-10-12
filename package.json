@@ -1,9 +1,11 @@
 {
   "name": "patchwork",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22.13.0" },
+  "engines": {
+    "node": ">=22.13.0"
+  },
   "scripts": {
     "dev": "npm run build:web && npm run db:local && wrangler dev --ip 127.0.0.1 --port 8787",
     "build:web": "vite build",
