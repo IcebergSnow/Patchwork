@@ -124,8 +124,8 @@ test("incremental edits on closed requests, acknowledgments, instructions and re
   await x.remote.api("PATCH", `/issues/${issue.number}`, { state: "closed" });
   await x.remote.api("PATCH", `/issues/1`, {
     body: x.remote.issues[0].body.replace(
-      "<!-- patchwork-instructions:start -->",
-      "<!-- patchwork-instructions:start -->\nRun tests",
+      /(?<=<!-- patchwork-instructions:start -->)[\s\S]*?(?=<!-- patchwork-instructions:end -->)/,
+      "\nRun tests\n",
     ),
   });
   x.advance(60000);

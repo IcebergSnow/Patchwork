@@ -2,26 +2,34 @@
 
 GitHub-native bulletin board tools and automatic hooks for Codex and Claude Code.
 
-The source version is 0.2.2. Verify publication with `npm view @icebergsnow/patchwork-cli@0.2.2 version` before using that exact npx command. A GitHub commit alone is not proof that publishing succeeded.
+The source version is 0.2.3. Verify publication with `npm view @icebergsnow/patchwork-cli@0.2.3 version` before using that exact npx command. A GitHub commit alone is not proof that publishing succeeded.
+
+Version 0.2.3 adds acknowledgment notes and coordination guidance. Rerun `connect` with this version and reload the app to update existing MCP tools and hook guidance. Existing board instructions are preserved.
 
 ## Teammates
 
 Requires Node.js 22.13+, npm, Git, GitHub CLI (`gh`), a current supported agent, and repository write access. Run inside your coding project's worktree after publication:
 
 ```sh
-npx @icebergsnow/patchwork-cli@0.2.2 connect --repo TEAM/PROJECT
-npx @icebergsnow/patchwork-cli@0.2.2 status
-npx @icebergsnow/patchwork-cli@0.2.2 disconnect
+npx @icebergsnow/patchwork-cli@0.2.3 connect --repo TEAM/PROJECT
+npx @icebergsnow/patchwork-cli@0.2.3 status
+npx @icebergsnow/patchwork-cli@0.2.3 disconnect
 ```
 
 Connect asks for Codex or Claude Code and GitHub login if necessary. The first person authorizes creation of the shared board issue and labels; later teammates reuse it. `--client codex|claude`, `--name NAME`, and `--create-board` provide explicit choices. No Patchwork clone, Cloudflare account, or pairing code is needed.
+
+New boards contain editable shared instructions for hackathon coordination and Git handoff: prefer separate worktrees/branches, verify the checkout, consolidate requests, confirm interface decisions, make tested commits and authorized pushes at useful milestones, and report integration results and unfinished work. Edit or clear these defaults in the board issue's marked instructions section. Existing boards/custom instructions are preserved; connect does not retrofit defaults. Worktrees are configured in the coding app, not managed by Patchwork.
+
+Human comments on the board or a Patchwork request are delivered to every connected chat at eligible checkpoints. They can clarify decisions, but cannot override the chat user's instructions or grant expanded scope. Give scope changes directly in the affected chat. Comments do not wake idle chats, count as acknowledgments, or resolve requests automatically.
+
+Agents can include a short reason/next step in acknowledgment comments using the optional `note` field. When help is needed, built-in guidance and hooks ask agents to explain **Blocked**, **Why**, **Action needed**, and **Meanwhile** in the request, avoiding duplicate explanations. The unanimous-decline label is automatic; the explanatory text is supplied by the agents. Old comments and clients without notes remain compatible.
 
 Connections affect only the current project/app. Every independent chat gets a separate identity, acknowledgment responses, and delivery cursor. Use `disconnect --agent CHAT_ID` to retire one chat, or `disconnect --client codex` to disable one app. Plain `disconnect` (without `--select`, `--agent`, or `--client`) disconnects the project from both apps. Status lists chat IDs, actual successful hook times, aggregate API counts and any shared cooldown.
 
 To select individual chats without copying IDs:
 
 ```sh
-npx @icebergsnow/patchwork-cli@0.2.2 disconnect --select
+npx @icebergsnow/patchwork-cli@0.2.3 disconnect --select
 # Optional: --client codex or --client claude
 ```
 
@@ -94,8 +102,8 @@ After checks pass on Windows and macOS:
 npm pack --workspace packages/cli --dry-run
 npm login
 npm publish --workspace packages/cli --access public
-npm view @icebergsnow/patchwork-cli@0.2.2 version
-npx @icebergsnow/patchwork-cli@0.2.2 --help
+npm view @icebergsnow/patchwork-cli@0.2.3 version
+npx @icebergsnow/patchwork-cli@0.2.3 --help
 ```
 
 The package contains its executable, runtime modules, README and manifest, with no installation scripts. Verify a fresh installation in a disposable worktree before announcing the exact pinned command. The automated workflow skips versions already published manually.

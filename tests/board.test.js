@@ -14,6 +14,7 @@ import {
   instructions,
   boardBody,
 } from "../packages/cli/lib/board.js";
+import { DEFAULT_SHARED_INSTRUCTIONS } from "../packages/cli/lib/instructions.js";
 import { GitHub, repository } from "../packages/cli/lib/github.js";
 const agent = (n, ownerId = 1) => ({
   id: `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`,
@@ -162,7 +163,60 @@ test("only marked Patchwork requests can be changed and metadata is bounded to t
   );
   assert.equal(metadata(marked("Hello", { type: "message" })).type, "message");
   assert.equal(metadata("hello <!-- patchwork:v1:notjson -->"), null);
-  assert.equal(instructions(boardBody(gh.repo)), "");
+  assert.equal(instructions(boardBody(gh.repo)), DEFAULT_SHARED_INSTRUCTIONS);
+});
+
+test("new boards explain human permissions and seed editable defaults without rewriting existing boards", async () => {
+  const gh = new FakeGitHub();
+  const board = await createBoard(gh);
+  assert.match(board.body, /do not wake idle chats, override a chat user's instructions, or authorize wider scope/);
+  assert.match(board.body, /\*\*Blocked\*\*.*\*\*Why\*\*.*\*\*Action needed\*\*.*\*\*Meanwhile\*\*/);
+  assert.equal(instructions(board.body), DEFAULT_SHARED_INSTRUCTIONS);
+  assert(DEFAULT_SHARED_INSTRUCTIONS.length < 4000);
+  const marker = /(?<=<!-- patchwork-instructions:start -->)[\s\S]*?(?=<!-- patchwork-instructions:end -->)/;
+  for (const custom of ["Use small commits; merge via PR.", ""]) {
+    const body = board.body.replace(marker, `\n${custom}\n`);
+    await gh.api("PATCH", `/issues/${board.number}`, { body });
+    assert.equal((await createBoard(gh)).body, body);
+    assert.equal(instructions((await findBoard(gh)).body), custom);
+  }
+  assert.equal(instructions("An old board without instructions."), "");
+  assert.equal(gh.issues.length, 1);
+});
+
+test("acknowledgment notes explain blockers, preserve legacy responses and deduplicate retries without hiding changed reasons", async () => {
+  const gh = new FakeGitHub(), board = await createBoard(gh), a = agent(1);
+  const c = { board: board.number, ownerId: 1 }, guard = async () => {};
+  await register(gh, c.board, a, true, "join");
+  const request = await perform(gh, c, a, {
+    action: "post", kind: "request", body: "Need a contract decision",
+  }, "request", guard);
+  const input = {
+    action: "ack", request_id: request.number, response: "cannot_handle",
+    note: "Blocked: contract decision. Why: outside my scope. Action needed: approve the contract in my chat. Meanwhile: continue independent UI work.",
+  };
+  const first = await perform(gh, c, a, input, "ack-1", guard);
+  assert.match(first.body, /\*\*Cannot handle\*\*\.\n\nBlocked: contract decision/);
+  assert.equal(metadata(first.body).type, "ack");
+  assert.equal((await snapshot(gh, c.board)).requests[0].needsHumanIntervention, true);
+  let count = gh.comments.length;
+  for (const note of [input.note, undefined, `  ${input.note}  `])
+    assert.equal((await perform(gh, c, a, { ...input, note }, "same", guard)).unchanged, true);
+  assert.equal(gh.comments.length, count);
+  const revised = { ...input, note: "Why: awaiting staging access. Action needed: provide access in my chat." };
+  gh.fail = { method: "POST", suffix: `/issues/${request.number}/comments`, after: true };
+  await assert.rejects(perform(gh, c, a, revised, "ack-2", guard));
+  await perform(gh, c, a, revised, "ack-2", guard);
+  assert.equal(gh.comments.length, count + 1);
+  assert.match(gh.comments.at(-1).body, /awaiting staging access/);
+  assert.equal(gh.issues.find(i => i.number === request.number).state, "open");
+  const before = gh.calls;
+  for (const note of [null, {}, 1, "", "   ", "x".repeat(1201)])
+    await assert.rejects(perform(gh, c, a, { ...input, note }, "invalid", guard), /acknowledgment note/);
+  assert.equal(gh.calls, before);
+  await perform(gh, c, a, { ...input, response: "can_handle", note: undefined }, "ack-3", guard);
+  assert.equal((await snapshot(gh, c.board)).requests[0].needsHumanIntervention, false);
+  assert.equal(gh.issues.find(i => i.number === request.number).state, "open");
 });
 test("GitHub transport uses fixed host/argv, JSON stdin, full pagination, sanitized errors", async () => {
   const calls = [];

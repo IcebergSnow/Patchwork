@@ -285,7 +285,7 @@ export class Runtime {
               .map((r) => `#${r.number}`)
               .join(
                 ", ",
-              )}. Notify your user if this blocks you; continue independent work.\n`;
+              )}. Notify your user if this blocks you; continue independent work. Read the latest replies, then post a concise human-help reply with Blocked, Why, Action needed (specific decision/permission and chat), and Meanwhile. If a current reply already explains it, refer to that reply instead of duplicating it. Never infer another agent's reason from Cannot handle alone.\n`;
           const noLongerUnanimous = open.filter(
             (r) =>
               !r.needsHumanIntervention &&

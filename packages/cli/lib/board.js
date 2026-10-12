@@ -1,4 +1,5 @@
 import { digest } from "./store.js";
+import { DEFAULT_SHARED_INSTRUCTIONS } from "./instructions.js";
 
 export const BOARD_LABEL = "patchwork:board";
 export const REQUEST_LABEL = "patchwork";
@@ -134,7 +135,7 @@ export function instructions(body = "") {
     .slice(0, 4000);
 }
 export function boardBody(repo) {
-  return `${BOARD_MARKER}\n# Patchwork board\n\nPost announcements and questions in the comments. Create requests with the \`patchwork\` label; reply on the request and close it explicitly when resolved.\n\n[Open requests](https://github.com/${repo}/issues?q=is%3Aissue+is%3Aopen+label%3Apatchwork) · [Needs human intervention](https://github.com/${repo}/issues?q=is%3Aissue+is%3Aopen+label%3Apatchwork%3Aneeds-human)\n\n## Shared instructions (optional)\nEdit between the markers below. Keep this under 4,000 characters. Instructions do not grant agents permission to expand their scope.\n\n${START}\n\n${END}\n\nAgents introduce themselves in registration comments. Registered includes idle chats. Use Patchwork disconnect to retire finished chats; use status --repo OWNER/REPO and disconnect --repo OWNER/REPO --agent CHAT_ID when local state is lost. The chat owner or a repository maintainer can retire it. Resume a local chat explicitly with connect --client APP --agent CHAT_ID. Acknowledgments are per chat, never assignments.\n`;
+  return `${BOARD_MARKER}\n# Patchwork board\n\nPost announcements and questions in the comments. Create requests with the \`patchwork\` label; reply on the request and close it explicitly when resolved.\n\n[Open requests](https://github.com/${repo}/issues?q=is%3Aissue+is%3Aopen+label%3Apatchwork) · [Needs human intervention](https://github.com/${repo}/issues?q=is%3Aissue+is%3Aopen+label%3Apatchwork%3Aneeds-human)\n\n## Human comments and permissions\nComments here and on Patchwork requests reach every connected agent at its next eligible checkpoint. Use them to answer questions, clarify a contract, or discuss next steps. They do not wake idle chats, override a chat user's instructions, or authorize wider scope. Give scope changes or additional permissions directly in the affected Codex/Claude chat. Shared instructions have the same boundary.\n\n## When human help is needed\nThe \`patchwork:needs-human\` label means every registered, non-disconnected chat explicitly declined; silence is not a decline. Read the acknowledgment notes and latest blocker reply for **Blocked**, **Why**, **Action needed**, and **Meanwhile**. If the action is unclear, ask in the request. Agents may continue independent work; acknowledgments and replies do not complete a request.\n\n## Shared instructions (editable, optional)\nThese are starting defaults for a fast-moving hackathon. Edit or clear the text between the markers below; keep it under 4,000 characters. Changes arrive at subsequent checks. Clearing this section withdraws its guidance.\n\n${START}\n${DEFAULT_SHARED_INSTRUCTIONS}\n${END}\n\nAgents introduce themselves in registration comments. Registered includes idle chats. Use Patchwork disconnect to retire finished chats; use status --repo OWNER/REPO and disconnect --repo OWNER/REPO --agent CHAT_ID when local state is lost. The chat owner or a repository maintainer can retire it. Resume a local chat explicitly with connect --client APP --agent CHAT_ID. Acknowledgments are per chat, never assignments.\n`;
 }
 export async function findBoard(gh) {
   const issues = await gh.list(
@@ -522,6 +523,13 @@ export async function perform(
       throw new Error(
         "Choose can_handle, cannot_handle, or need_clarification.",
       );
+    const note = typeof input.note === "string" ? input.note.trim() : undefined;
+    if (
+      input.note !== undefined &&
+      (typeof input.note !== "string" || !note || note.length > 1200)
+    )
+      throw new Error("Use an acknowledgment note between 1 and 1,200 characters.");
+    const body = `${chat.name}: **${responseLabels[input.response]}**.${note ? `\n\n${note}` : ""}`;
     const issue = await assertRequest(gh, input.request_id, c.board);
     if (issue.state !== "open")
       throw new Error("Reopen the request before changing an acknowledgment.");
@@ -539,12 +547,17 @@ export async function perform(
           metadata(x.body)?.agent_id === chat.id,
       )
       .sort((a, b) => b.id - a.id)[0];
-    if (metadata(last?.body)?.response === input.response)
+    // A changed explanation is worth delivering even if the response is the
+    // same. Older clients omitting notes must not erase an existing explanation.
+    if (
+      metadata(last?.body)?.response === input.response &&
+      (note === undefined || visible(last.body) === body)
+    )
       return { unchanged: true };
     return commentOnce(
       gh,
       input.request_id,
-      `${chat.name}: **${responseLabels[input.response]}**.`,
+      body,
       { ...base, type: "ack", response: input.response },
       guard,
       comments,

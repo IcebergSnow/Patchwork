@@ -81,12 +81,21 @@ export function server(runtime) {
   );
   register(
     "acknowledge_request",
-    "Record THIS chat's Can handle, Cannot handle, or Need clarification response. Does not assign or complete work.",
+    "Record THIS chat's Can handle, Cannot handle, or Need clarification response. For a decline or clarification, include a note explaining the blocker and concrete next step. Does not assign or complete work.",
     z
       .object({
         chat_key: key,
         request_id: z.number().int().positive(),
         response: z.enum(["can_handle", "cannot_handle", "need_clarification"]),
+        note: z
+          .string()
+          .trim()
+          .min(1)
+          .max(1200)
+          .optional()
+          .describe(
+            "Brief human-readable reason and next step. If human help is needed, explain what is blocked, why, and the exact decision/permission needed in which chat. Never include secrets or private local paths.",
+          ),
       })
       .strict(),
   );

@@ -76,4 +76,20 @@ test("real MCP protocol exposes narrow tools, rejects old recipient parameters a
     arguments: { request_id: id, response: "cannot_handle" },
   });
   assert(missing.isError);
+  const note = "Why: only authorized for UI. Action needed: authorize contract edits in my chat.";
+  const ack = await client.callTool({
+    name: "acknowledge_request",
+    arguments: { chat_key: chat.chat_key, request_id: id, response: "cannot_handle", note },
+  });
+  assert(!ack.isError);
+  assert(gh.comments.some(c => c.body.includes(note)));
+  const beforeInvalid = gh.calls;
+  for (const note of ["   ", "x".repeat(1201), 123]) {
+    const result = await client.callTool({
+      name: "acknowledge_request",
+      arguments: { chat_key: chat.chat_key, request_id: id, response: "cannot_handle", note },
+    });
+    assert(result.isError);
+  }
+  assert.equal(gh.calls, beforeInvalid);
 });
