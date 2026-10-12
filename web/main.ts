@@ -18,6 +18,7 @@ let session = sessions.find(s => s.roomId === localStorage.getItem('patchwork.ac
 let board: Board | null = null, tab = 'board', filter = 'all', landing = 'create', page = session ? 'room' : 'welcome';
 let messages: Message[] = [], nextBefore: number | null = null, selectedAgent = '', replyTo = 0, offline = '', syncing = false;
 let pagesLoaded = 1;
+const expandedInstructions = new Set<string>();
 let keys = load<Record<string,string>>('patchwork.agentKeys', {}), needsKey = true, toastTimer = 0;
 const drafts = new Map<string, Record<string, FormDataEntryValue>>();
 function draftKey(form: HTMLFormElement) { return `${form.dataset.room}:${form.dataset.form}:${form.dataset.id??''}`; }
@@ -54,7 +55,7 @@ async function api<T = any>(path: string, method = 'GET', data?: unknown): Promi
   return result;
 }
 function relative(time: string | null) {
-  if (!time) return 'Not connected yet';
+  if (!time) return 'Never';
   const minutes = Math.max(0, Math.floor((Date.now() - Date.parse(time))/60000));
   if (minutes < 1) return 'just now';
   if (minutes < 60) return `${minutes}m ago`;
@@ -66,55 +67,58 @@ function brand() { return '<span class="brand"><span class="mark" aria-hidden="t
 function button(label: string, action: string, extra = '', classes = '') { return `<button type="button" class="button ${classes}" data-action="${action}" ${extra}>${label}</button>`; }
 function welcome() {
   return `<div class="shell"><header class="topbar">${brand()}${sessions.length ? button('Back to my room', 'back-room', '', 'quiet') : '<span class="small muted">Built for teams that move quickly</span>'}</header>
-  <main class="welcome"><section class="intro"><div class="eyebrow">Different agents. Shared context.</div><h1>A shared place<br>to work things out.</h1><p>Keep your coding agents in sync, wherever they run. Post a request, pick it up, and keep the team in the loop.</p>
+  <main class="welcome"><section class="intro"><div class="eyebrow">Different agents. Shared context.</div><h1>A shared place<br>to work things out.</h1><p>Keep your coding agents in sync, wherever they run. Ask a question, share an update, and keep the team in the loop.</p>
   <div class="principles"><div><strong>One board for the whole team</strong><p>Share a request with everyone, or address a specific agent.</p></div><div><strong>Agents remember to check</strong><p>Hooks bring new messages into the conversation at work checkpoints.</p></div><div><strong>Your instructions, if you need them</strong><p>Add a few words about how you want your agents to work.</p></div></div></section>
   <section class="panel"><div class="welcome-tabs" role="tablist" aria-label="Room access">${button('Create a room','landing-create',`role="tab" aria-selected="${landing==='create'}"`,'quiet')}${button('Join a room','landing-join',`role="tab" aria-selected="${landing==='join'}"`,'quiet')}</div>
   <div id="welcome-error" class="error" role="alert" hidden></div>
   ${landing === 'create' ? `<form data-form="create-room"><label><span>Room name</span><input name="name" required maxlength="80" placeholder="Weekend build"></label><label><span>Your name</span><input name="memberName" required maxlength="80" autocomplete="name" placeholder="Alex"></label><label><span>Repository URL <span class="muted">· optional</span></span><input name="repository" type="url" placeholder="https://github.com/your-team/project"></label>${needsKey?'<label><span>Room creation key</span><input name="creationKey" type="password" autocomplete="off" required><span class="field-help">Provided by the person hosting Patchwork.</span></label>':''}<button class="button primary" type="submit">Create room <span aria-hidden="true">↗</span></button></form>` : `<form data-form="join-room"><label><span>Invitation link or token</span><input name="invite" required value="${e(incomingInvite)}" placeholder="Paste your team’s invitation" autocomplete="off"></label><label><span>Your name</span><input name="name" required maxlength="80" autocomplete="name" placeholder="Alex"></label><button class="button primary" type="submit">Join the room <span aria-hidden="true">↗</span></button></form>`}
   <p class="small muted welcome-note">Your room access is remembered in this browser.</p></section></main></div>`;
 }
+function connectionActivity(agent: Agent) {
+  if (!agent.last_seen_at && !agent.last_hook_at) return `${agent.revoked?'<span>Connection revoked</span>':''}<span>Never connected</span>`;
+  const checked = agent.last_hook_at ? `<span>Last automatic check <time datetime="${e(agent.last_hook_at)}" title="${e(timestamp(agent.last_hook_at))}">${e(relative(agent.last_hook_at))}</time></span>` : '<span>Last automatic check: never</span>';
+  const seen = agent.last_seen_at ? `<span>Last seen <time datetime="${e(agent.last_seen_at)}" title="${e(timestamp(agent.last_seen_at))}">${e(relative(agent.last_seen_at))}</time></span>` : '<span>Never connected</span>';
+  return `${agent.revoked?'<span>Connection revoked</span>':''}${seen}${checked}`;
+}
 function agentCard(agent: Agent) {
-  const label = agent.revoked ? 'Revoked' : agent.last_hook_at ? 'Hooks connected' : agent.last_seen_at ? 'MCP connected' : 'Awaiting connection';
-  return `<div class="agent"><div class="row spread"><span class="agent-name">${e(agent.name)}</span><span class="badge">${e(label)}</span></div><p class="small">${e(agent.scope)}</p><p class="small muted">${agent.client==='claude'?'Claude Code':e(agent.client)} · ${agent.last_hook_at?`Last automatic check ${e(relative(agent.last_hook_at))}`:agent.last_seen_at?`Last seen ${e(relative(agent.last_seen_at))}`:'No check-in yet'}</p></div>`;
+  return `<div class="agent"><div class="row spread"><span class="agent-name">${e(agent.name)}</span><span class="small muted">${agent.client==='claude'?'Claude Code':agent.client==='codex'?'Codex':'Other app'}</span></div><p class="small muted connection-activity">${connectionActivity(agent)}</p></div>`;
 }
 function agentsView() {
   const agents=board!.agents.filter(a=>!a.revoked);
-  return `<div class="row spread"><h3>Agents <span class="muted">${agents.length}</span></h3>${button('+ Connect','setup','','tiny quiet')}</div>${agents.length?agents.map(agentCard).join(''):'<p class="small muted">Connect an agent and give it a scope. New messages will arrive at its work checkpoints.</p>'}`;
+  return `<h3>Agents <span class="muted">${agents.length}</span></h3>${agents.length?agents.map(agentCard).join(''):'<p class="small muted">Add an agent in Room &amp; connections to get started.</p>'}`;
 }
 function instructionsView() {
   const room=board!.room, owner=room.owner_id===session!.memberId;
-  return `<h3>Custom instructions <span class="muted small">· optional</span></h3><p class="instruction">Anything else you want your agents to remember.</p>
+  return `<details id="custom-instructions" ${expandedInstructions.has(room.id)?'open':''}><summary>Custom instructions <span class="muted small">· optional</span></summary><p class="instruction">Anything else you want your agents to remember.</p>
     <form data-form="instructions"><input type="hidden" name="version" value="${room.instructions_version}"><label><span class="sr-only">Custom instructions</span><textarea name="instructions" maxlength="4000" ${owner?'':'readonly'} placeholder="Run tests before pushing.\nCommit after a meaningful task.\nLet me know about major blockers.">${e(room.instructions)}</textarea></label>
     ${owner?'<div class="row"><button class="button tiny" type="submit">Save instructions</button>'+button('Reload saved','reload-instructions','','tiny quiet')+'</div>':'<p class="small muted">The room owner can edit these instructions.</p>'}</form>
-    <p class="instruction">Shared with every agent through its hooks. Reminded at work checkpoints, roughly every five minutes while active. The agent decides how to carry them out.</p>`;
+    <p class="instruction">Shared with every agent through its hooks. Reminded at work checkpoints, roughly every five minutes while active. The agent decides how to carry them out.</p></details>`;
 }
 function thread(root: Message) {
   const replies = messages.filter(m=>m.reply_to===root.id).sort((a,b)=>a.id-b.id);
-  const canResolve = board!.room.owner_id===session!.memberId || root.author_id===session!.memberId || root.claimed_by===session!.memberId;
-  return `<article class="thread" id="message-${root.id}"><div class="byline"><strong>${e(root.author_name)}</strong><span class="badge">${e(root.kind==='ready'||root.kind==='integration'?'update':root.kind)} #${root.id}</span>${root.status?`<span class="badge ${e(root.status)}">${e(root.status)}</span>`:''}<time datetime="${e(root.created_at)}">${e(timestamp(root.created_at))}</time></div>${root.recipient_id?`<p class="recipient">To ${e(board!.agents.find(a=>a.id===root.recipient_id)?.name??'an unavailable agent')}</p>`:''}<p class="body">${e(root.body)}</p>
+  const canResolve = board!.room.owner_id===session!.memberId || root.author_id===session!.memberId;
+  return `<article class="thread" id="message-${root.id}"><div class="byline"><strong>${e(root.author_name)}</strong><span class="badge">${root.kind==='request'?'Request':'Message'} #${root.id}</span>${root.status?`<span class="badge ${e(root.status)}">${root.status==='open'?'Open':'Resolved'}</span>`:''}<time datetime="${e(root.created_at)}">${e(timestamp(root.created_at))}</time></div>${root.recipient_id?`<p class="recipient">To ${e(board!.agents.find(a=>a.id===root.recipient_id)?.name??'an unavailable agent')}</p>`:''}<p class="body">${e(root.body)}</p>
   ${replies.length?`<div class="replies">${replies.map(reply=>`<div class="reply"><div class="byline"><strong>${e(reply.author_name)}</strong><time datetime="${e(reply.created_at)}">${e(timestamp(reply.created_at))}</time></div><p class="body">${e(reply.body)}</p></div>`).join('')}</div>`:''}
-  <div class="thread-actions"><span class="small muted">${root.claimed_name?`Claimed by ${e(root.claimed_name)}`:root.kind==='request'&&root.status==='open'?'Waiting for someone to pick this up':''}</span>${button('Reply','reply',`data-id="${root.id}"`,'tiny quiet')}${root.status==='open'?button('Claim','claim',`data-id="${root.id}"`,'tiny'):''}${root.status&&canResolve?button(root.status==='resolved'?'Reopen':'Resolve',root.status==='resolved'?'reopen':'resolve',`data-id="${root.id}"`,'tiny'):''}</div>
+  <div class="thread-actions">${button('Reply','reply',`data-id="${root.id}"`,'tiny quiet')}${root.status&&canResolve?button(root.status==='resolved'?'Reopen':'Resolve',root.status==='resolved'?'reopen':'resolve',`data-id="${root.id}"`,'tiny'):''}</div>
   ${replyTo===root.id?`<form class="reply-form" data-form="reply" data-id="${root.id}"><label><span class="small">Reply to #${root.id}</span><textarea name="body" required maxlength="8000" placeholder="Add context or share an outcome…"></textarea></label><div class="row"><button class="button primary tiny" type="submit">Post reply</button>${button('Cancel','cancel-reply','','tiny quiet')}</div></form>`:''}</article>`;
 }
 function feed() {
-  const roots = messages.filter(m=>m.reply_to===null && (filter==='all'||m.kind==='request'&&m.status!=='resolved')).sort((a,b)=>b.id-a.id);
-  return `${roots.length?roots.map(thread).join(''):`<div class="empty"><h3>${filter==='open'?'No open requests':'Start the conversation'}</h3><p>${filter==='open'?'Requests will appear here until they’re resolved.':'Post a question, share your scope, or let the team know what you’re building.'}</p></div>`}${nextBefore?button('Load older threads','older','','quiet'):''}`;
+  const roots = messages.filter(m=>m.reply_to===null && (filter==='all'||m.kind==='request'&&m.status==='open')).sort((a,b)=>b.id-a.id);
+  return `${roots.length?roots.map(thread).join(''):`<div class="empty"><h3>${filter==='open'?'No open requests':'Start the conversation'}</h3><p>${filter==='open'?'Requests will appear here until they’re resolved.':'Post a question or let the team know what you’re building.'}</p></div>`}${nextBefore?button('Load older threads','older','','quiet'):''}`;
 }
 function boardView() {
-  return `<div class="layout"><section><div class="row spread"><h2>Bulletin board</h2><div class="row filters">${button('All messages','filter-all',`aria-pressed="${filter==='all'}"`,'tiny quiet')}${button(`Open requests <span id="open-count">${board!.openRequests}</span>`,'filter-open',`aria-pressed="${filter==='open'}"`,'tiny quiet')}</div></div>
-  <form class="composer" data-form="post"><label><span>Share something with the team</span><textarea name="body" required maxlength="8000" placeholder="What do you need, or what should the team know?"></textarea></label><div class="row spread"><div class="row"><select name="kind" aria-label="Message type"><option value="note">Announcement / concern</option><option value="request">Request</option><option value="update">Update</option></select><select name="recipientId" aria-label="Recipient"><option value="">To everyone</option>${board!.agents.filter(a=>!a.revoked).map(a=>`<option value="${a.id}">To ${e(a.name)}</option>`).join('')}</select></div><button class="button primary" type="submit">Post message</button></div></form><div id="feed">${feed()}</div></section><aside><section class="aside-section" id="agent-list">${agentsView()}</section><section class="instructions-box" id="instructions-box">${instructionsView()}</section></aside></div>`;
+  return `<div class="layout"><section><div class="row spread"><h2>Bulletin board</h2><div class="row filters">${button('All messages','filter-all',`aria-pressed="${filter==='all'}"`,'tiny quiet')}${button(`Unresolved <span id="open-count">${board!.openRequests}</span>`,'filter-open',`aria-pressed="${filter==='open'}"`,'tiny quiet')}</div></div>
+  <form class="composer" data-form="post"><label><span>Share something with the team</span><textarea name="body" required maxlength="8000" placeholder="What do you need, or what should the team know?"></textarea></label><div class="row spread"><div class="row"><select name="kind" aria-label="Message type"><option value="message">Message</option><option value="request">Request</option></select><select name="recipientId" aria-label="Recipient"><option value="">To everyone</option>${board!.agents.filter(a=>!a.revoked).map(a=>`<option value="${a.id}">To ${e(a.name)}</option>`).join('')}</select></div><button class="button primary" type="submit">Post message</button></div></form><div id="feed">${feed()}</div></section><aside><section class="aside-section" id="agent-list">${agentsView()}</section><section class="instructions-box" id="instructions-box">${instructionsView()}</section></aside></div>`;
 }
 function connectionDetails(agent: Agent) {
   const token=keys[agent.id], url=`${location.origin}/mcp`;
   const config=connectionConfiguration(agent.client,url,token??'YOUR_AGENT_TOKEN');
-  const status=agent.revoked?'Connection revoked':agent.last_hook_at?`Automatic check ${relative(agent.last_hook_at)}`:agent.last_seen_at?'MCP connected · waiting for hooks':'Waiting for the first connection';
-  return `<div class="connection"><div class="row spread"><h3>${e(agent.name)}</h3><span class="badge" id="connection-state">${e(status)}</span></div>
-  <form data-form="scope" data-id="${agent.id}"><label><span>Assigned scope</span><textarea name="scope" required maxlength="2000" ${agent.revoked?'disabled':''}>${e(agent.scope)}</textarea></label>${agent.revoked?'':'<button class="button tiny" type="submit">Save scope</button>'}</form>
+  return `<div class="connection"><h3>${e(agent.name)}</h3><p class="small muted connection-activity" id="connection-state">${connectionActivity(agent)}</p>
   ${!token?'<p class="banner">The token is only available in the browser that created it. Replace it to reconnect from this browser.</p>':''}
   <label><span>Server address</span><input readonly value="${e(url)}"></label><label><span>Agent token</span><input readonly type="password" value="${e(token??'Unavailable in this browser')}" id="agent-token"></label>
   <div class="row">${token?button('Copy token','copy-token',`data-id="${agent.id}"`,'tiny'):''}${button('Replace token','rotate-agent',`data-id="${agent.id}"`,'tiny quiet')}${!agent.revoked?button('Revoke','revoke-agent',`data-id="${agent.id}"`,'tiny quiet danger'):''}</div>
   <h3>1. Connect ${agent.client==='codex'?'Codex':agent.client==='claude'?'Claude Code':'your app'}</h3>
-  <p class="instruction">${agent.client==='codex'?'Add the MCP entry to this project’s .codex/config.toml.':agent.client==='claude'?'Add the MCP entry to this project’s .mcp.json. This integration is for Claude Code, including the Code tab in the desktop app.':'Add a Streamable HTTP MCP connection with the server address and a Bearer Authorization header. Adapt this example to your client.'} Keep the credential file local and untracked. Merge with existing settings. Use separate project/configuration contexts for agents with different scopes.</p>
+  <p class="instruction">${agent.client==='codex'?'Add the MCP entry to this project’s .codex/config.toml.':agent.client==='claude'?'Add the MCP entry to this project’s .mcp.json. This integration is for Claude Code, including the Code tab in the desktop app.':'Add a Streamable HTTP MCP connection with the server address and a Bearer Authorization header. Adapt this example to your client.'} Keep the credential file local and untracked. Merge with existing settings. Use separate project/configuration contexts and tokens for separate agent identities.</p>
   <details><summary>Connection configuration</summary><pre id="connection-config">${e(config)}</pre>${token?button('Copy connection','copy-config','','tiny'):''}</details>
   <h3>2. Enable automatic checks</h3><p class="instruction">${agent.client==='codex'?'Merge the hooks below into this project’s .codex/hooks.json. Reload Codex and review and trust the hooks in its hook controls (/hooks in the CLI).':agent.client==='claude'?'Merge the hooks below into .claude/settings.local.json. Reload Claude Code and check /hooks to confirm they are enabled.':'These hooks work with Codex and Claude Code. Other apps need compatible MCP lifecycle hooks; otherwise use the board tools manually.'} Then start coding. The first successful hook check appears here.</p>
   <details><summary>Automatic hook configuration</summary><pre id="hook-config">${e(JSON.stringify(hookConfiguration(),null,2))}</pre>${button('Copy hooks','copy-hooks','','tiny')}</details>
@@ -127,7 +131,7 @@ function setupView() {
   const selected=mine.find(a=>a.id===selectedAgent);
   return `<div class="setup-grid"><div class="stack"><section class="panel"><h2>The room</h2><p class="muted">${e(b.room.name)} · ${b.members.length} participant${b.members.length===1?'':'s'}</p>
   ${owner?`<label><span>Invite teammates</span><input id="invite-link" readonly value="${e(session!.invite?`${location.origin}/#invite=${encodeURIComponent(session!.invite)}`:'Create a fresh invitation link')}" aria-label="Invitation link"></label><div class="row">${session!.invite?button('Copy invite','copy-invite','','tiny'):''}${button(session!.invite?'Replace invite':'Create invite','rotate-invite','','tiny quiet')}</div><p class="instruction">Replacing an invitation expires the old link. Existing members keep access.</p>`:'<p class="instruction">Ask the room owner to share an invitation link.</p>'}
-  </section><section class="panel"><h2>Connect an agent</h2><p class="muted small">Give it a name and a scope. The board handles introductions.</p><form data-form="create-agent"><label><span>Agent name</span><input name="name" required maxlength="80" placeholder="${e(session!.name)} / frontend"></label><label><span>App</span><select name="client"><option value="codex">Codex</option><option value="claude">Claude Code · desktop or CLI</option><option value="other">Other MCP client</option></select></label><label><span>Scope</span><textarea name="scope" required maxlength="2000" placeholder="Project cards and navigation in frontend/. Ask the board for API changes."></textarea></label><button class="button primary" type="submit">Create connection</button></form></section></div>
+  </section><section class="panel"><h2>Connect an agent</h2><p class="muted small">Give it a name and choose its app. The board handles introductions.</p><form data-form="create-agent"><label><span>Agent name</span><input name="name" required maxlength="80" placeholder="${e(session!.name)} / Codex"></label><label><span>App</span><select name="client"><option value="codex">Codex</option><option value="claude">Claude Code · desktop or CLI</option><option value="other">Other MCP client</option></select></label><button class="button primary" type="submit">Create connection</button></form></section></div>
   <section class="panel"><h2>Agent connections</h2>${mine.length?`<label><span>Agent connection</span><select id="agent-picker">${mine.map(a=>`<option value="${a.id}" ${a.id===selectedAgent?'selected':''}>${e(a.name)}${a.revoked?' (revoked)':''}</option>`).join('')}</select></label>${selected?connectionDetails(selected):''}`:'<div class="empty"><h3>Bring your first agent</h3><p>Create a connection, add the MCP entry and hooks in the app, and start coding.</p></div>'}</section></div>`;
 }
 function render() {
@@ -183,7 +187,7 @@ async function refresh(full=false, older=false) {
         restoreDrafts();
       }
       const selected=data.agents.find(a=>a.id===selectedAgent), connection=document.querySelector('#connection-state');
-      if(selected&&connection) connection.textContent=selected.revoked?'Connection revoked':selected.last_hook_at?`Automatic check ${relative(selected.last_hook_at)}`:selected.last_seen_at?'MCP connected · waiting for hooks':'Waiting for the first connection';
+      if(selected&&connection) connection.innerHTML=connectionActivity(selected);
       document.querySelector('#offline')?.setAttribute('hidden','');
       const sync=document.querySelector('#sync-state');if(sync) sync.innerHTML='<span class="dot"></span>Board updated just now';
     }
@@ -222,13 +226,19 @@ app.addEventListener('click', async event=> {
       if(!confirm(action==='revoke-agent'?'Revoke this agent connection? It will stop accessing the board.':'Replace this token? Update the app with the new token to reconnect.'))return;
       const result=await api(`/api/agents/${id}${action==='rotate-agent'?'/token':''}`,action==='rotate-agent'?'POST':'DELETE');
       if(result.token)keys[id]=result.token;else delete keys[id];saveKeys();await refresh(true);
-    } else if(['claim','resolve','reopen'].includes(action)) {await api(`/api/requests/${id}/${action}`,'POST');await refresh(true);}
+    } else if(['resolve','reopen'].includes(action)) {await api(`/api/requests/${id}/${action}`,'POST');await refresh(true);}
   }catch(error){toast(error instanceof Error?error.message:'Action failed.');}
   finally{target.disabled=false;}
 });
+app.addEventListener('toggle', event=> {
+  const details=event.target as HTMLDetailsElement;
+  if(details.id==='custom-instructions' && details.isConnected && board) {
+    if(details.open) expandedInstructions.add(board.room.id); else expandedInstructions.delete(board.room.id);
+  }
+}, true);
 app.addEventListener('input', event=> {
   const form=(event.target as HTMLElement).closest<HTMLFormElement>('form');
-  if(form && ['post','reply','instructions','scope'].includes(form.dataset.form??'')) drafts.set(draftKey(form),Object.fromEntries(new FormData(form).entries()));
+  if(form && ['post','reply','instructions'].includes(form.dataset.form??'')) drafts.set(draftKey(form),Object.fromEntries(new FormData(form).entries()));
 });
 app.addEventListener('change',async event=> {
   const target=event.target as HTMLSelectElement;
@@ -248,13 +258,11 @@ app.addEventListener('submit',async event=> {
       if(type==='join-room'){const raw=String(data.invite);try{const url=new URL(raw);data.invite=decodeURIComponent(url.hash.replace(/^#invite=/,''));}catch{data.invite=raw.trim();}}
       const next=await api<Session>(type==='create-room'?'/api/rooms':'/api/join','POST',data);saveSession(next);page='room';tab='setup';board=null;messages=[];nextBefore=null;pagesLoaded=1;await refresh(true);
     } else if(type==='post'||type==='reply') {
-      await api('/api/messages','POST',{...data,...(type==='reply'?{replyTo:Number(form.dataset.id),kind:'note'}:{recipientId:data.recipientId||null})});drafts.delete(draftKey(form));form.reset();replyTo=0;await refresh(true);
+      await api('/api/messages','POST',{...data,...(type==='reply'?{replyTo:Number(form.dataset.id),kind:'message'}:{recipientId:data.recipientId||null})});drafts.delete(draftKey(form));form.reset();replyTo=0;await refresh(true);
     } else if(type==='create-agent') {
       const result=await api('/api/agents','POST',data);keys[result.id]=result.token;saveKeys();selectedAgent=result.id;await refresh(true);toast('Connection created. Add it in your agent app.');
     } else if(type==='instructions') {
       await api('/api/instructions','PUT',{instructions:data.instructions,version:Number(data.version)});drafts.delete(draftKey(form));await refresh(true);toast('Instructions saved. Hooks will deliver them at the next eligible checkpoint.');
-    } else if(type==='scope') {
-      await api(`/api/agents/${form.dataset.id}`,'PATCH',{scope:data.scope});drafts.delete(draftKey(form));await refresh(true);toast('Scope saved.');
     }
   }catch(error){const message=error instanceof Error?error.message:'Action failed.';if(errorBox){errorBox.textContent=message;errorBox.hidden=false;}else toast(message);}
   finally{submit.disabled=false;}

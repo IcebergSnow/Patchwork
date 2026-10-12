@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { database } from './database';
 import {
   authenticate, createAgent, createRoom, joinRoom, postMessage, readMessages, requestAction,
-  rotateAgent, rotateInvite, snapshot, saveInstructions, updateAgent, HttpError,
+  rotateAgent, rotateInvite, snapshot, saveInstructions, HttpError,
 } from '../src/domain';
 
 async function fixture() {
@@ -16,7 +16,7 @@ const errorStatus = (status:number) => (error:unknown) => error instanceof HttpE
 
 test('rooms store credential hashes and never expose them through snapshots',async()=>{
   const {db,sqlite,credentials,owner}=await fixture();
-  const created=await createAgent(db,owner,{name:'Alice / Codex',client:'codex',scope:'frontend/'});
+  const created=await createAgent(db,owner,{name:'Alice / Codex',client:'codex'});
   const state=await snapshot(db,owner);
   assert.equal(state.agents[0].last_seen_at,null);
   assert.equal(state.room.name,'Test room');
@@ -30,48 +30,50 @@ test('room isolation covers messages, replies, agent management, and token types
   const second=await createRoom(db,{name:'Other room',memberName:'Other'});
   const outsider=await authenticate(db,`Bearer ${second.token}`,'member');
   const privateMessage=await postMessage(db,owner,{body:'Private',kind:'request'});
-  const agent=await createAgent(db,owner,{name:'Agent',client:'codex',scope:'ui/'});
+  const agent=await createAgent(db,owner,{name:'Agent',client:'codex'});
   assert.deepEqual((await readMessages(db,outsider)).messages,[]);
   await assert.rejects(postMessage(db,outsider,{body:'Cross-room reply',replyTo:privateMessage.id}),errorStatus(404));
-  await assert.rejects(requestAction(db,outsider,privateMessage.id,'claim'),errorStatus(404));
+  await assert.rejects(requestAction(db,outsider,privateMessage.id,'resolve'),errorStatus(404));
   await assert.rejects(rotateAgent(db,outsider,agent.id),errorStatus(404));
   await assert.rejects(authenticate(db,`Bearer ${agent.token}`,'member'),errorStatus(401));
   await assert.rejects(authenticate(db,`Bearer ${second.token}`,'agent'),errorStatus(401));
 });
 
-test('only one concurrent claimant wins, and claim changes appear after the cursor',async()=>{
+test('request changes are atomic, idempotent, and visible after a message cursor',async()=>{
+  const {db,owner}=await fixture();
+  const request=await postMessage(db,owner,{kind:'request',body:'Need ownerName.'});
+  await Promise.all([requestAction(db,owner,request.id,'resolve'),requestAction(db,owner,request.id,'resolve')]);
+  const updates=await readMessages(db,owner,request.id);
+  assert.equal(updates.messages.length,1);
+  assert.equal(updates.messages[0].reply_to,request.id);
+  assert.match(updates.messages[0].body,/resolved/);
+  await requestAction(db,owner,request.id,'reopen');
+  assert.equal((await snapshot(db,owner,0,true)).openRequests,1);
+});
+
+test('only the requester, intended recipient, or room owner can resolve and reopen',async()=>{
   const {db,owner,credentials}=await fixture();
   const joined=await joinRoom(db,{name:'Bob',invite:credentials.invite});
   const bob=await authenticate(db,`Bearer ${joined.token}`,'member');
-  const request=await postMessage(db,owner,{kind:'request',body:'Need ownerName.'});
-  const attempts=await Promise.allSettled([requestAction(db,owner,request.id,'claim'),requestAction(db,bob,request.id,'claim')]);
-  assert.equal(attempts.filter(a=>a.status==='fulfilled').length,1);
-  const failed=attempts.find(a=>a.status==='rejected') as PromiseRejectedResult;
-  assert.equal(failed.reason.status,409);
-  const updates=await readMessages(db,bob,request.id);
-  assert.equal(updates.messages.length,1);
-  assert.equal(updates.messages[0].reply_to,request.id);
-  assert.match(updates.messages[0].body,/Claimed/);
-});
-
-test('request lifecycle respects requester, claimant, and owner permissions',async()=>{
-  const {db,owner,credentials}=await fixture();
-  const bobCredentials=await joinRoom(db,{name:'Bob',invite:credentials.invite});
-  const eveCredentials=await joinRoom(db,{name:'Eve',invite:credentials.invite});
-  const bob=await authenticate(db,`Bearer ${bobCredentials.token}`,'member');
-  const eve=await authenticate(db,`Bearer ${eveCredentials.token}`,'member');
-  const request=await postMessage(db,bob,{kind:'request',body:'Backend request'});
-  await assert.rejects(requestAction(db,eve,request.id,'resolve'),errorStatus(403));
-  await requestAction(db,owner,request.id,'claim');
-  assert.equal((await requestAction(db,bob,request.id,'resolve')).status,'resolved');
-  const reopened=await requestAction(db,bob,request.id,'reopen');
-  assert.equal(reopened.status,'open');assert.equal(reopened.claimed_by,null);
-  assert.equal((await requestAction(db,eve,request.id,'claim')).claimed_by,eve.id);
+  const target=await createAgent(db,bob,{name:'Target'});
+  const recipient=await authenticate(db,`Bearer ${target.token}`,'agent');
+  const other=await createAgent(db,owner,{name:'Other'});
+  const unrelated=await authenticate(db,`Bearer ${other.token}`,'agent');
+  const request=await postMessage(db,bob,{kind:'request',body:'Need help',recipientId:target.id});
+  await postMessage(db,unrelated,{body:'I can help too',replyTo:request.id});
+  for(const action of ['resolve','reopen'] as const) await assert.rejects(requestAction(db,unrelated,request.id,action),errorStatus(403));
+  for(const actor of [recipient,bob,owner]) {
+    assert.equal((await requestAction(db,actor,request.id,'resolve')).status,'resolved');
+    assert.equal((await requestAction(db,actor,request.id,'reopen')).status,'open');
+  }
+  const broadcast=await postMessage(db,bob,{kind:'request',body:'Everyone: help'});
+  await assert.rejects(requestAction(db,recipient,broadcast.id,'resolve'),errorStatus(403));
+  assert.equal((await requestAction(db,bob,broadcast.id,'resolve')).status,'resolved');
 });
 
 test('revocation and rotation invalidate old credentials without removing history',async()=>{
   const {db,owner,credentials}=await fixture();
-  const agent=await createAgent(db,owner,{name:'Code',client:'claude',scope:'api/'});
+  const agent=await createAgent(db,owner,{name:'Code',client:'claude'});
   const actor=await authenticate(db,`Bearer ${agent.token}`,'agent');
   await postMessage(db,actor,{body:'Keep this history.'});
   const replaced=await rotateAgent(db,owner,agent.id);
@@ -103,8 +105,8 @@ test('only the owner edits instructions and stale edits cannot overwrite newer t
 
 test('directed messages stay room-visible and replies retain their recipient',async()=>{
   const {db,owner}=await fixture();
-  const one=await createAgent(db,owner,{name:'Frontend',client:'codex',scope:'ui/'});
-  const two=await createAgent(db,owner,{name:'Backend',client:'claude',scope:'api/'});
+  const one=await createAgent(db,owner,{name:'Frontend',client:'codex'});
+  const two=await createAgent(db,owner,{name:'Backend',client:'claude'});
   const frontend=await authenticate(db,`Bearer ${one.token}`,'agent');
   const backend=await authenticate(db,`Bearer ${two.token}`,'agent');
   const root=await postMessage(db,frontend,{body:'Need ownerName',kind:'request',recipientId:two.id});
@@ -119,14 +121,29 @@ test('directed messages stay room-visible and replies retain their recipient',as
   await assert.rejects(postMessage(db,owner,{body:'Revoked target',recipientId:two.id}),errorStatus(400));
 });
 
-test('participants can edit their own scopes and the room owner can manage scopes',async()=>{
-  const {db,owner,credentials}=await fixture();
-  const joined=await joinRoom(db,{name:'Bob',invite:credentials.invite});
-  const bob=await authenticate(db,`Bearer ${joined.token}`,'member');
-  const one=await createAgent(db,owner,{name:'Agent',client:'codex',scope:'ui/'});
-  await assert.rejects(updateAgent(db,bob,one.id,{scope:'backend/'}),errorStatus(403));
-  await updateAgent(db,owner,one.id,{scope:'frontend/'});
-  assert.equal((await snapshot(db,owner)).agents[0].scope,'frontend/');
+test('an identity alone creates a connection; old scope data is not exposed or changed',async()=>{
+  const {db,sqlite,owner}=await fixture();
+  const created=await createAgent(db,owner,{name:'Agent'});
+  assert.equal((await authenticate(db,`Bearer ${created.token}`,'agent')).id,created.id);
+  sqlite.prepare('UPDATE agents SET scope = ? WHERE id = ?').run('Historical responsibility',created.id);
+  const state=await snapshot(db,owner);
+  assert.equal(state.agents[0].client,'other');
+  assert.ok(!('scope' in state.agents[0]));
+  assert.equal(sqlite.prepare('SELECT scope FROM agents WHERE id = ?').get(created.id)!.scope,'Historical responsibility');
+});
+
+test('board operations preserve event history without writing unused activity records',async()=>{
+  const {db,sqlite,owner,credentials}=await fixture();
+  sqlite.prepare('INSERT INTO events (room_id,actor_name,kind,summary,created_at) VALUES (?,?,?,?,?)').run(owner.room.id,'Alice','legacy','Historical event','2025-01-01');
+  await joinRoom(db,{name:'Bob',invite:credentials.invite});
+  await rotateInvite(db,owner);
+  const agent=await createAgent(db,owner,{name:'Agent'});
+  await saveInstructions(db,owner,{instructions:'Run tests.',version:0});
+  const request=await postMessage(db,owner,{kind:'request',body:'Help'});
+  await requestAction(db,owner,request.id,'resolve');
+  await rotateAgent(db,owner,agent.id);
+  await rotateAgent(db,owner,agent.id,true);
+  assert.deepEqual(sqlite.prepare('SELECT summary FROM events').all().map(row=>row.summary),['Historical event']);
 });
 
 test('message cursors and older threads retain replies and pending requests',async()=>{

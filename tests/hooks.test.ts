@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { database } from './database';
-import { authenticate, createAgent, createRoom, postMessage, saveInstructions, updateAgent } from '../src/domain';
+import { authenticate, createAgent, createRoom, postMessage, readMessages, saveInstructions, requestAction } from '../src/domain';
 import { checkBoard, CHECK_INTERVAL_MS, INSTRUCTION_INTERVAL_MS } from '../src/hooks';
 import { hookConfiguration } from '../src/connections';
 
@@ -9,8 +9,8 @@ async function fixture() {
   const { db, sqlite } = database();
   const room = await createRoom(db,{name:'Hook room',memberName:'Owner'});
   const owner = await authenticate(db,`Bearer ${room.token}`,'member');
-  const one = await createAgent(db,owner,{name:'Frontend',client:'codex',scope:'frontend/'});
-  const two = await createAgent(db,owner,{name:'Backend',client:'claude',scope:'backend/'});
+  const one = await createAgent(db,owner,{name:'Frontend',client:'codex'});
+  const two = await createAgent(db,owner,{name:'Backend',client:'claude'});
   const agent = await authenticate(db,`Bearer ${one.token}`,'agent');
   const backend = await authenticate(db,`Bearer ${two.token}`,'agent');
   return { db, sqlite, owner, agent, backend };
@@ -19,15 +19,16 @@ const event = (session='chat-1', kind='PostToolUse') => ({session_id:session,hoo
 const context = (result: Awaited<ReturnType<typeof checkBoard>>) => result.hookSpecificOutput?.additionalContext ?? '';
 const start = 1_000_000;
 
-test('native hook contract delivers scope, relevant messages, and custom instructions',async()=>{
-  const {db,owner,agent,backend}=await fixture();
+test('native hook contract delivers identities, relevant messages, and custom instructions',async()=>{
+  const {db,sqlite,owner,agent,backend}=await fixture();
+  sqlite.prepare('UPDATE agents SET scope = ?').run('Legacy authoritative scope');
   await saveInstructions(db,owner,{instructions:'Run tests before pushing.',version:0});
   await postMessage(db,owner,{body:'For frontend',recipientId:agent.id,kind:'request'});
   await postMessage(db,owner,{body:'Backend only reminder',recipientId:backend.id});
   await postMessage(db,owner,{body:'Everyone: API shapes are ready'});
   const result=await checkBoard(db,agent,event('chat-1','UserPromptSubmit'),start);
   assert.equal(result.hookSpecificOutput?.hookEventName,'UserPromptSubmit');
-  assert.match(context(result),/frontend\//);assert.match(context(result),/Run tests before pushing/);
+  assert.match(context(result),/Frontend|Backend/);assert.ok(!context(result).includes('Legacy authoritative scope'));assert.ok(!context(result).includes('claim'));assert.match(context(result),/Run tests before pushing/);
   assert.match(context(result),/For frontend/);assert.match(context(result),/Everyone: API/);
   assert.ok(!context(result).includes('Backend only reminder'));
   assert.ok(!('decision' in result));assert.ok(!('continue' in result));
@@ -60,12 +61,14 @@ test('instructions repeat at the next eligible checkpoint and changes and cleari
   assert.deepEqual(await checkBoard(db,agent,event(),start+2*INSTRUCTION_INTERVAL_MS+2000),{});
 });
 
-test('session resume and compaction reintroduce context, and scope updates reach an existing chat',async()=>{
+test('session resume and compaction refresh the roster without replaying old messages',async()=>{
   const {db,owner,agent}=await fixture();
+  await postMessage(db,owner,{body:'Read once'});
   await checkBoard(db,agent,event(),start);
-  assert.match(context(await checkBoard(db,agent,event('chat-1','SessionStart'),start+1000)),/Your assigned scope/);
-  await updateAgent(db,owner,agent.id,{scope:'design-system/'});
-  assert.match(context(await checkBoard(db,agent,event(),start+CHECK_INTERVAL_MS+1000)),/design-system/);
+  const resumed=context(await checkBoard(db,agent,event('chat-1','SessionStart'),start+1000));
+  assert.match(resumed,/Your agent id/);assert.ok(!resumed.includes('Read once'));
+  await createAgent(db,owner,{name:'New teammate'});
+  assert.match(context(await checkBoard(db,agent,event(),start+CHECK_INTERVAL_MS+1000)),/New teammate/);
 });
 
 test('a simultaneous hook event gets one delivery and releases its lease',async()=>{
@@ -78,6 +81,7 @@ test('a simultaneous hook event gets one delivery and releases its lease',async(
 
 test('bounded previews do not skip a backlog, and failures preserve the cursor for retry',async()=>{
   const {db,sqlite,owner,agent}=await fixture();
+  await checkBoard(db,agent,event(),start-CHECK_INTERVAL_MS);
   const ids=[];
   for(let i=0;i<25;i++)ids.push((await postMessage(db,owner,{body:`Message ${i}: `+'x'.repeat(7000)})).id);
   let all='';
@@ -121,12 +125,123 @@ test('generated hook configs pass only lifecycle metadata and exclude board tool
   }
 });
 
-test('long team scopes never truncate owner instructions',async()=>{
+test('large rosters never truncate owner instructions',async()=>{
   const {db,owner,agent}=await fixture();
-  await updateAgent(db,owner,agent.id,{scope:'Frontend '.repeat(200)});
-  for(let i=0;i<12;i++)await createAgent(db,owner,{name:`Agent ${i} `+'n'.repeat(60),client:'other',scope:'Scope '.repeat(300)});
+  for(let i=0;i<12;i++)await createAgent(db,owner,{name:`Agent ${i} `+'n'.repeat(60),client:'other'});
   const instructions='i'.repeat(3900)+' END OF OWNER INSTRUCTIONS';
   await saveInstructions(db,owner,{instructions,version:0});
   const text=context(await checkBoard(db,agent,event(),start));
   assert.ok(text.includes(instructions));assert.ok(text.length<=12000);
+});
+
+test('first contact prioritizes old open requests and recent context, then skips historical backlog',async()=>{
+  const {db,sqlite,owner,agent,backend}=await fixture();
+  const open=await postMessage(db,owner,{body:'Old open request for you',kind:'request',recipientId:agent.id});
+  const resolved=await postMessage(db,owner,{body:'Old resolved request',kind:'request'});
+  await requestAction(db,owner,resolved.id,'resolve');
+  for(let i=0;i<60;i++)await postMessage(db,owner,{body:`Archived announcement ${i}`});
+  await postMessage(db,owner,{body:'Request only for another agent',kind:'request',recipientId:backend.id});
+  for(let i=0;i<3;i++)await postMessage(db,owner,{body:`Recent relevant context ${i}`});
+  const boundary=Number(sqlite.prepare('SELECT MAX(id) AS id FROM messages').get()!.id);
+  const first=context(await checkBoard(db,agent,event(),start));
+  assert.match(first,/Old open request for you/);assert.match(first,/Recent relevant context 2/);
+  assert.ok(!first.includes('Archived announcement'));assert.ok(!first.includes('Old resolved request'));assert.ok(!first.includes('Request only for another agent'));
+  assert.equal(first.split(`"id":${open.id},`).length-1,1);
+  assert.equal(sqlite.prepare('SELECT cursor FROM hook_sessions').get()!.cursor,boundary);
+  assert.deepEqual(await checkBoard(db,agent,event(),start+CHECK_INTERVAL_MS),{});
+  await postMessage(db,owner,{body:'New after initialization'});
+  const next=context(await checkBoard(db,agent,event(),start+2*CHECK_INTERVAL_MS));
+  assert.match(next,/New after initialization/);assert.ok(!next.includes('Archived announcement'));
+});
+
+test('large initial request sets stay bounded and all remaining requests are readable with a cursor',async()=>{
+  const {db,owner,agent}=await fixture();
+  await saveInstructions(db,owner,{instructions:'i'.repeat(4000),version:0});
+  for(let i=0;i<30;i++)await postMessage(db,owner,{body:`Request ${i}: `+'r'.repeat(7000),kind:'request',recipientId:agent.id});
+  const first=context(await checkBoard(db,agent,event(),start));
+  assert.ok(first.length<=12000);assert.match(first,/More relevant open requests/);
+  assert.ok(first.includes('i'.repeat(4000)));
+  const ids=new Set<number>();let cursor=0,more=true;
+  while(more) {
+    const page=await readMessages(db,agent,cursor,7,{openOnly:true,relevantOnly:true});
+    page.messages.forEach(m=>ids.add(m.id));cursor=page.nextCursor;more=page.hasMore;
+  }
+  assert.equal(ids.size,30);
+  assert.deepEqual(await checkBoard(db,agent,event(),start+CHECK_INTERVAL_MS),{});
+});
+
+test('discussions reach participating agents without a role directory or cross-agent cursor sharing',async()=>{
+  const {db,owner,agent,backend}=await fixture();
+  const target=await createAgent(db,owner,{name:'Third teammate'});
+  const thread=await postMessage(db,owner,{body:'Addressed elsewhere',recipientId:target.id});
+  await postMessage(db,agent,{body:'I have useful context',replyTo:thread.id});
+  await checkBoard(db,agent,event('same-session'),start);
+  await checkBoard(db,backend,event('same-session'),start);
+  await postMessage(db,owner,{body:'Follow-up for this discussion',replyTo:thread.id});
+  assert.match(context(await checkBoard(db,agent,event('same-session'),start+CHECK_INTERVAL_MS)),/Follow-up for this discussion/);
+  assert.deepEqual(await checkBoard(db,backend,event('same-session'),start+CHECK_INTERVAL_MS),{});
+});
+
+test('failed initialization and failed cursor commits retry; abandoned leases expire',async()=>{
+  const {db,sqlite,owner,agent}=await fixture();
+  await postMessage(db,owner,{body:'Recover initial request',kind:'request'});
+  const prepare=db.prepare.bind(db);
+  db.prepare=((sql:string)=>{if(sql.startsWith('SELECT m.*'))throw new Error('read interrupted');return prepare(sql);}) as typeof db.prepare;
+  await assert.rejects(checkBoard(db,agent,event(),start),/read interrupted/);
+  db.prepare=prepare;
+  assert.equal(sqlite.prepare('SELECT context_hash FROM hook_sessions').get()!.context_hash,'');
+  assert.match(context(await checkBoard(db,agent,event(),start+1000)),/Recover initial request/);
+  const prior=sqlite.prepare('SELECT cursor FROM hook_sessions').get()!.cursor;
+  await postMessage(db,owner,{body:'Retry after failed commit'});
+  db.prepare=((sql:string)=>{if(sql.startsWith('UPDATE hook_sessions SET cursor'))throw new Error('commit interrupted');return prepare(sql);}) as typeof db.prepare;
+  await assert.rejects(checkBoard(db,agent,event(),start+CHECK_INTERVAL_MS+1000),/commit interrupted/);
+  db.prepare=prepare;
+  assert.equal(sqlite.prepare('SELECT cursor FROM hook_sessions').get()!.cursor,prior);
+  sqlite.prepare('UPDATE hook_sessions SET lease_until = ?').run(start+2*CHECK_INTERVAL_MS);
+  assert.deepEqual(await checkBoard(db,agent,event('chat-1','UserPromptSubmit'),start+CHECK_INTERVAL_MS+2000),{});
+  assert.match(context(await checkBoard(db,agent,event(),start+2*CHECK_INTERVAL_MS)),/Retry after failed commit/);
+});
+
+test('messages arriving during initialization are delivered on the next check',async()=>{
+  const {db,sqlite,owner,agent}=await fixture();
+  await postMessage(db,owner,{body:'Before the boundary'});
+  const prepare=db.prepare.bind(db);let inserted=false;
+  db.prepare=((sql:string)=>{
+    if(sql.startsWith('SELECT m.*')&&!inserted) {
+      inserted=true;
+      sqlite.prepare("INSERT INTO messages (room_id,author_id,author_name,author_type,kind,body,created_at) VALUES (?,?,?,'member','message',?,?)").run(owner.room.id,owner.id,owner.name,'Arrived during check','2026-01-01');
+    }
+    return prepare(sql);
+  }) as typeof db.prepare;
+  const initial=context(await checkBoard(db,agent,event(),start));
+  db.prepare=prepare;
+  assert.ok(!initial.includes('Arrived during check'));
+  assert.match(context(await checkBoard(db,agent,event(),start+CHECK_INTERVAL_MS)),/Arrived during check/);
+});
+
+test('failure after the cursor update rolls back the entire check',async()=>{
+  const {db,sqlite,owner,agent}=await fixture();
+  await checkBoard(db,agent,event(),start);
+  await postMessage(db,owner,{body:'Recover after partial transaction'});
+  const before=sqlite.prepare('SELECT cursor, last_checked FROM hook_sessions').get();
+  sqlite.exec("CREATE TRIGGER fail_check BEFORE UPDATE OF last_hook_at ON agents BEGIN SELECT RAISE(ABORT, 'interrupted transaction'); END");
+  await assert.rejects(checkBoard(db,agent,event(),start+CHECK_INTERVAL_MS),/interrupted transaction/);
+  assert.deepEqual(sqlite.prepare('SELECT cursor, last_checked FROM hook_sessions').get(),before);
+  sqlite.exec('DROP TRIGGER fail_check');
+  assert.match(context(await checkBoard(db,agent,event(),start+CHECK_INTERVAL_MS)),/Recover after partial transaction/);
+});
+
+test('an expired check cannot deliver or advance a cursor after another check takes its lease',async()=>{
+  const {db,sqlite,owner,agent}=await fixture();
+  await postMessage(db,owner,{body:'Lease-protected message'});
+  const prepare=db.prepare.bind(db);
+  db.prepare=((sql:string)=>{
+    if(sql.startsWith('UPDATE hook_sessions SET cursor')) sqlite.prepare('UPDATE hook_sessions SET lease_id = ?, lease_until = ?').run('replacement',start+15_000);
+    return prepare(sql);
+  }) as typeof db.prepare;
+  assert.deepEqual(await checkBoard(db,agent,event(),start),{});
+  db.prepare=prepare;
+  assert.equal(sqlite.prepare('SELECT cursor FROM hook_sessions').get()!.cursor,0);
+  assert.equal(sqlite.prepare('SELECT last_hook_at FROM agents WHERE id = ?').get(agent.id)!.last_hook_at,null);
+  assert.match(context(await checkBoard(db,agent,event(),start+15_000)),/Lease-protected message/);
 });
