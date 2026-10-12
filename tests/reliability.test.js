@@ -4,6 +4,8 @@ import path from "node:path";
 import { mkdir, readdir, unlink, rm } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import fs from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import {
   connection,
   temporary,
@@ -492,4 +494,54 @@ test("locks reject recursive acquisition and recover crashed owners without over
   await locked(file, async () => {});
   await write(`${file}.lock`, String(child.pid));
   await locked(file, async () => {});
+});
+
+test("Windows stale-lock sharing violations retry acquisition without losing mutual exclusion", async (t) => {
+  const dir = await temporary(t),
+    file = path.join(dir, "state"),
+    lock = `${file}.lock`;
+  const child = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+  await once(child, "exit");
+  const owner = path.join(lock, `${child.pid}-${crypto.randomUUID()}`);
+  await mkdir(lock);
+  await write(owner, "");
+  const platform = Object.getOwnPropertyDescriptor(process, "platform");
+  const originals = { readdir: fs.readdir, unlink: fs.unlink, rmdir: fs.rmdir };
+  const failures = new Set();
+  try {
+    Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+    for (const [name, code] of [
+      ["readdir", "EPERM"],
+      ["unlink", "EACCES"],
+      ["rmdir", "EBUSY"],
+    ]) {
+      fs[name] = async (...args) => {
+        if (args[0] === (name === "unlink" ? owner : lock) && !failures.has(name)) {
+          failures.add(name);
+          throw Object.assign(new Error("Transient sharing violation"), { code });
+        }
+        return originals[name](...args);
+      };
+    }
+    syncBuiltinESMExports();
+    let inside = 0,
+      completed = 0;
+    await Promise.all(
+      Array.from({ length: 4 }, () =>
+        locked(file, async () => {
+          assert.equal(inside++, 0);
+          await new Promise((resolve) => setTimeout(resolve, 3));
+          completed++;
+          inside--;
+        }),
+      ),
+    );
+    assert.equal(completed, 4);
+    assert.equal(failures.size, 3);
+  } finally {
+    Object.assign(fs, originals);
+    syncBuiltinESMExports();
+    Object.defineProperty(process, "platform", platform);
+  }
+  await assert.rejects(readdir(lock), { code: "ENOENT" });
 });

@@ -135,7 +135,17 @@ export async function locked(file, fn) {
             throw new Error("Invalid Patchwork lock.");
           }
         } catch (e) {
-          if (e.code !== "ENOENT") throw e;
+          // Windows can report a sharing violation while another waiter is
+          // removing the stale directory. Retry the entire acquisition under
+          // the existing deadline; never treat a failed cleanup as ownership.
+          if (
+            e.code !== "ENOENT" &&
+            !(
+              process.platform === "win32" &&
+              ["EPERM", "EACCES", "EBUSY"].includes(e.code)
+            )
+          )
+            throw e;
         }
         if (Date.now() - started >= 60_000) {
           const error = new Error(
