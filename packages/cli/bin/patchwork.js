@@ -13,10 +13,12 @@ Usage (inside your coding project's Git worktree):
   patchwork connect [--repo OWNER/REPO] [--client codex|claude] [--name NAME] [--create-board] [--agent CHAT_ID]
   patchwork status [--client codex|claude] [--repo OWNER/REPO]
   patchwork disconnect [--client codex|claude] [--agent CHAT_ID] [--repo OWNER/REPO]
+  patchwork disconnect --select [--client codex|claude]
 
 Requires Node.js 22.13+, Git, GitHub CLI (gh), and repository write access.
 Connect affects chats in this project only. Each chat gets its own identity.
-Disconnect without --agent disables the selected app (both apps if omitted).
+Disconnect without --agent or --select disables the selected app (both apps if omitted).
+Use disconnect --select to pick individual chats with local message previews.
 Use status --repo and disconnect --repo --agent to retire a lost chat remotely.
 Use connect --client APP --agent CHAT_ID to explicitly resume a local chat.
 GitHub credentials remain with gh. No Cloudflare account or pairing code.
@@ -84,6 +86,7 @@ try {
       "create-board": { type: "boolean" },
       agent: { type: "string" },
       connection: { type: "string" },
+      select: { type: "boolean" },
     },
   });
   command = args.positionals[0];
@@ -92,6 +95,8 @@ try {
   } else {
     if (args.positionals.length !== 1) throw new Error("Use patchwork --help.");
     const { client, repo, name, agent, connection } = args.values;
+    if (args.values.select && (command !== "disconnect" || agent || repo))
+      throw new Error("Use --select only with disconnect in the local project, without --agent or --repo.");
     if (client && !["codex", "claude"].includes(client))
       throw new Error("Choose --client codex or --client claude.");
     if (command === "connect") {
@@ -109,9 +114,12 @@ try {
       });
     } else if (command === "status")
       console.log(JSON.stringify(await status({ client, repo }), null, 2));
-    else if (command === "disconnect")
-      await disconnect({ client, agent, repo });
-    else if (command === "mcp") {
+    else if (command === "disconnect") {
+      if (args.values.select) {
+        const { disconnectPicker } = await import("../lib/disconnect-picker.js");
+        await disconnectPicker({ client });
+      } else await disconnect({ client, agent, repo });
+    } else if (command === "mcp") {
       if (!connection) throw new Error("Missing local connection path.");
       await serve(connection);
     } else if (command === "hook") {

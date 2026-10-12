@@ -60,7 +60,15 @@ try {
   });
   assert.equal(result.status, 0);
   assert(result.stdout.includes("disconnect"));
+  assert(result.stdout.includes("disconnect --select"));
   assert(result.stdout.includes("GitHub"));
+  const picker = spawnSync(process.execPath, [cli, "disconnect", "--select"], {
+    cwd: dir,
+    encoding: "utf8",
+    input: "1\ny\n",
+  });
+  assert.equal(picker.status, 1);
+  assert.match(picker.stderr, /requires a terminal/);
   // Also exercise the executable installed by npm, including its Windows shim.
   const shim = path.join(
     dir,

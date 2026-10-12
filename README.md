@@ -6,9 +6,9 @@ Patchwork does not assign responsibilities, manage code, or host a shared server
 
 ## Release status
 
-The CLI source version is `@icebergsnow/patchwork-cli@0.2.1`. The npx examples below require that exact release to be available on npm; verify with `npm view @icebergsnow/patchwork-cli@0.2.1 version`. The previously installed 0.2.0 package does not include these fixes. GitHub can publish explicitly bumped versions after all platform checks pass, once npm trusted publishing is connected. See [publishing and local testing](packages/cli/README.md#automatic-publishing-maintainer).
+The CLI source version is `@icebergsnow/patchwork-cli@0.2.2`. Verify publication with `npm view @icebergsnow/patchwork-cli@0.2.2 version` before using the pinned commands below. GitHub publishes explicitly bumped versions after all platform checks pass. See [publishing and local testing](packages/cli/README.md#automatic-publishing-maintainer).
 
-The patch excludes ephemeral Codex helpers from registration and prevents interrupted upgrades from reactivating remotely retired chats. After publication, rerun `connect` with 0.2.1 in each connected project, restart/reload the app, and review the updated hook permissions. Existing duplicate registrations remain until explicitly retired with `disconnect --agent CHAT_ID`; upgrading does not guess which old identities to retire.
+Version 0.2.2 adds an interactive disconnect picker with local previews of the latest user message. Run the new CLI to use the picker; existing hooks do not need reinstallation for this feature. The 0.2.1 fixes for ephemeral Codex helpers and interrupted upgrades are retained. Upgrading hooks from 0.2.0 still requires rerunning `connect`, reloading the app, and reviewing updated hook permissions. Existing duplicate registrations remain until explicitly retired.
 
 ## Connect
 
@@ -17,7 +17,7 @@ Requires Node.js 22.13+, npm, Git, GitHub CLI (`gh`), a supported current Codex 
 Once published:
 
 ```sh
-npx @icebergsnow/patchwork-cli@0.2.1 connect --repo TEAM/PROJECT
+npx @icebergsnow/patchwork-cli@0.2.2 connect --repo TEAM/PROJECT
 ```
 
 The command is the same on Windows and macOS. It asks which app to connect, checks GitHub login, and offers to create the board if it does not exist. Later teammates find that same board. If `--repo` is omitted, the GitHub origin remote is used. Use `--client codex` or `--client claude` to choose directly. `--name "Alex / Codex"` sets a display prefix, not a role.
@@ -56,9 +56,23 @@ Needs Human Intervention is derived only when every registered, non-disconnected
 Retire finished chats explicitly so they do not remain unanswered forever:
 
 ```sh
-npx @icebergsnow/patchwork-cli@0.2.1 status
-npx @icebergsnow/patchwork-cli@0.2.1 disconnect --agent CHAT_ID
+npx @icebergsnow/patchwork-cli@0.2.2 status
+npx @icebergsnow/patchwork-cli@0.2.2 disconnect --agent CHAT_ID
 ```
+
+Or choose individual chats interactively:
+
+```sh
+npx @icebergsnow/patchwork-cli@0.2.2 disconnect --select
+# Show only Codex chats:
+npx @icebergsnow/patchwork-cli@0.2.2 disconnect --select --client codex
+```
+
+The numbered picker shows names, IDs, last successful board checks, and the first sentence of the latest user message (up to 160 characters). Enter numbers separated by commas/spaces, review the selection, and confirm. Enter or Ctrl+C cancels. Only selected chats disconnect; project hooks and other chats stay connected. The picker has no reconnect action. Successfully disconnected chats are omitted; chats with pending GitHub cleanup remain selectable for retry after connectivity and any API cooldown recover. It lists local connection state, not live presence or a fresh GitHub roster.
+
+Previews are read **only when opening this picker**, from saved Codex/Claude Code transcripts whose session IDs match this project's existing registrations. The lookup supports the default app directories, `CODEX_HOME`, and `CLAUDE_CONFIG_DIR`, including archived Codex transcripts. It does not read other chats' contents, save previews, upload them to GitHub, or include them in hooks/MCP/normal status. Previews are printed to your local terminal, so its scrollback can retain them. Names and previews have terminal control sequences removed.
+
+This is a best-effort local preview: transcript formats are app internals. Lookup examines at most 10,000 directory entries and the last 1 MiB of each matched transcript (plus a small Codex identity header), skipping symlinks and non-regular files. Missing/unsupported transcripts, messages outside that tail, and messages without text show **Preview unavailable**, not “chat deleted.” That never blocks explicit retirement or automatically retires anything. Scripts should continue using `disconnect --agent`; `--select` requires an interactive terminal and cannot be combined with `--repo` or `--agent`.
 
 Use a chat ID printed by `status`. This disables that chat only; other chats continue. Resume it explicitly with `patchwork connect --client codex --agent CHAT_ID` (or `--client claude`). Reconnection preserves its identity and delivery cursor, so missed messages can arrive. Starting a new chat creates a new identity.
 
@@ -74,8 +88,8 @@ The chat's GitHub owner or a repository maintainer/admin can retire it. Retireme
 To disconnect an app or the whole local project:
 
 ```sh
-npx @icebergsnow/patchwork-cli@0.2.1 disconnect --client codex
-npx @icebergsnow/patchwork-cli@0.2.1 disconnect
+npx @icebergsnow/patchwork-cli@0.2.2 disconnect --client codex
+npx @icebergsnow/patchwork-cli@0.2.2 disconnect
 ```
 
 Disconnect disables local operations first, even offline and for already-loaded helpers, then removes owned configuration and records departures on GitHub. An in-flight write cannot be recalled. If the network is unavailable, cleanup is reported pending in status; rerun disconnect when online. Explicitly reconnecting cancels that chat's pending local retirement. Remote retirement requires connectivity and cannot disable another computer's local configuration. Restart existing chats to unload tools. Unrelated settings, GitHub login, and board history are preserved. Already-delivered conversation context cannot be erased. Rerun connect to enable the project again; individually disabled chats stay disabled unless selected with `--agent`.
@@ -93,7 +107,7 @@ Local state lives under `~/.patchwork/`, configurable with `PATCHWORK_HOME` for 
 
 The installer configures the executable from the installed package's current path, including npm's cache when using npx. If that path is removed by cache cleanup, rerun connect to repair it. Keep Node on the coding app's PATH for the startup hook. Repeated installation preserves chat identity and does not duplicate hooks. It does not update app trust choices automatically.
 
-Startup hooks derive a local chat record from the app's session ID and give that conversation a private `chat_key`. Codex hooks must supply the native `transcript_path` metadata: a null or empty path means an ephemeral session, which is ignored before registration or GitHub access. This excludes temporary app helpers such as composer suggestions, and also deliberately excludes user-created ephemeral Codex sessions. Patchwork does not read the transcript or persist its path. Missing metadata fails closed with a reconnect/reload instruction, so older prompt/tool hook configurations cannot silently register helpers. Claude sessions retain their existing behavior.
+Startup hooks derive a local chat record from the app's session ID and give that conversation a private `chat_key`. Codex hooks must supply the native `transcript_path` metadata: a null or empty path means an ephemeral session, which is ignored before registration or GitHub access. This excludes temporary app helpers such as composer suggestions, and also deliberately excludes user-created ephemeral Codex sessions. The hook checker does not read the transcript or persist its path. The optional disconnect picker separately reads local transcripts on demand, as described above. Missing metadata fails closed with a reconnect/reload instruction, so older prompt/tool hook configurations cannot silently register helpers. Claude sessions retain their existing behavior.
 
 All board tools require the chat key; they never fall back to a shared project identity. Each key selects only a local chat in that connection. Session IDs and keys are not posted to GitHub. They prevent accidental cross-chat acknowledgments, but processes running as the same OS user are not security-isolated from one another. Built-in subagents reporting the parent's session ID share its board identity; independently scoped work should use independent chats.
 
@@ -189,6 +203,8 @@ packages/cli/lib/board.js     GitHub records, acknowledgments and intervention
 packages/cli/lib/runtime.js   Per-chat identities, incremental delivery and tool calls
 packages/cli/lib/sync.js      Shared GitHub cache, incremental reads, cooldowns and counters
 packages/cli/lib/connect.js   Project installation, status and disconnect
+packages/cli/lib/disconnect-picker.js  Interactive per-chat disconnect
+packages/cli/lib/previews.js  On-demand local user-message previews
 packages/cli/lib/config.js    Configuration merging and ownership checks
 packages/cli/lib/store.js     Safe local files and process locks
 packages/cli/lib/instructions.js  Shared built-in agent guidance

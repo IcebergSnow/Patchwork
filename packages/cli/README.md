@@ -2,21 +2,32 @@
 
 GitHub-native bulletin board tools and automatic hooks for Codex and Claude Code.
 
-The source version is 0.2.1. Verify publication with `npm view @icebergsnow/patchwork-cli@0.2.1 version` before using that exact npx command. A GitHub commit alone is not proof that publishing succeeded.
+The source version is 0.2.2. Verify publication with `npm view @icebergsnow/patchwork-cli@0.2.2 version` before using that exact npx command. A GitHub commit alone is not proof that publishing succeeded.
 
 ## Teammates
 
 Requires Node.js 22.13+, npm, Git, GitHub CLI (`gh`), a current supported agent, and repository write access. Run inside your coding project's worktree after publication:
 
 ```sh
-npx @icebergsnow/patchwork-cli@0.2.1 connect --repo TEAM/PROJECT
-npx @icebergsnow/patchwork-cli@0.2.1 status
-npx @icebergsnow/patchwork-cli@0.2.1 disconnect
+npx @icebergsnow/patchwork-cli@0.2.2 connect --repo TEAM/PROJECT
+npx @icebergsnow/patchwork-cli@0.2.2 status
+npx @icebergsnow/patchwork-cli@0.2.2 disconnect
 ```
 
 Connect asks for Codex or Claude Code and GitHub login if necessary. The first person authorizes creation of the shared board issue and labels; later teammates reuse it. `--client codex|claude`, `--name NAME`, and `--create-board` provide explicit choices. No Patchwork clone, Cloudflare account, or pairing code is needed.
 
-Connections affect only the current project/app. Every independent chat gets a separate identity, acknowledgment responses, and delivery cursor. Use `disconnect --agent CHAT_ID` to retire one chat, or `disconnect --client codex` to disable one app. Omit both to disconnect the project from both apps. Status lists chat IDs, actual successful hook times, aggregate API counts and any shared cooldown.
+Connections affect only the current project/app. Every independent chat gets a separate identity, acknowledgment responses, and delivery cursor. Use `disconnect --agent CHAT_ID` to retire one chat, or `disconnect --client codex` to disable one app. Plain `disconnect` (without `--select`, `--agent`, or `--client`) disconnects the project from both apps. Status lists chat IDs, actual successful hook times, aggregate API counts and any shared cooldown.
+
+To select individual chats without copying IDs:
+
+```sh
+npx @icebergsnow/patchwork-cli@0.2.2 disconnect --select
+# Optional: --client codex or --client claude
+```
+
+The terminal picker shows each local chat's name, ID, last board check, and the first sentence of its latest user message. Enter numbers separated by commas/spaces and confirm. Enter or Ctrl+C cancels. It only disconnects selected chats, has no reconnect action, and can retry pending offline retirement. Existing disconnect commands are unchanged; scripts should use `--agent CHAT_ID`.
+
+Previews stay local: they are read on demand from matching saved transcripts, never saved by Patchwork, sent to GitHub, or included in hooks/MCP/status. Terminal scrollback may retain the displayed text. Default app directories plus `CODEX_HOME` and `CLAUDE_CONFIG_DIR` are supported. Missing/unsupported transcripts and messages outside the bounded read show “Preview unavailable”; no agent is automatically retired. Existing chats work without hook reinstallation for this picker.
 
 Version 0.2.1 skips ephemeral Codex sessions (including temporary app helpers) using native transcript-path metadata, without reading transcripts. Use saved Codex chats. To upgrade from 0.2.0 after publication, rerun `connect` with 0.2.1, reload the app, and approve the updated hooks. Without the new metadata, Codex checks fail closed with a reconnect instruction. Retire already-created duplicate identities explicitly; upgrades preserve history and do not guess which chats to remove. Interrupted upgrades no longer reactivate remotely retired chats.
 
@@ -83,8 +94,8 @@ After checks pass on Windows and macOS:
 npm pack --workspace packages/cli --dry-run
 npm login
 npm publish --workspace packages/cli --access public
-npm view @icebergsnow/patchwork-cli@0.2.1 version
-npx @icebergsnow/patchwork-cli@0.2.1 --help
+npm view @icebergsnow/patchwork-cli@0.2.2 version
+npx @icebergsnow/patchwork-cli@0.2.2 --help
 ```
 
 The package contains its executable, runtime modules, README and manifest, with no installation scripts. Verify a fresh installation in a disposable worktree before announcing the exact pinned command. The automated workflow skips versions already published manually.
