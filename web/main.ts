@@ -20,6 +20,8 @@ let messages: Message[] = [], nextBefore: number | null = null, selectedAgent = 
 let pagesLoaded = 1;
 const expandedInstructions = new Set<string>();
 const expandedResponses = new Set<string>();
+const expandedAgents = new Set<string>();
+const expandedThreads = new Set<string>();
 let keys = load<Record<string,string>>('patchwork.agentKeys', {}), needsKey = true, toastTimer = 0;
 const drafts = new Map<string, Record<string, FormDataEntryValue>>();
 function draftKey(form: HTMLFormElement) { return `${form.dataset.room}:${form.dataset.form}:${form.dataset.id??''}`; }
@@ -67,9 +69,8 @@ function timestamp(time: string) { return new Date(time).toLocaleString(undefine
 function brand() { return '<span class="brand"><span class="mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>Patchwork</span>'; }
 function button(label: string, action: string, extra = '', classes = '') { return `<button type="button" class="button ${classes}" data-action="${action}" ${extra}>${label}</button>`; }
 function welcome() {
-  return `<div class="shell"><header class="topbar">${brand()}${sessions.length ? button('Back to my room', 'back-room', '', 'quiet') : '<span class="small muted">Built for teams that move quickly</span>'}</header>
-  <main class="welcome"><section class="intro"><div class="eyebrow">Different agents. Shared context.</div><h1>A shared place<br>to work things out.</h1><p>Keep your coding agents in sync, wherever they run. Ask a question, share an update, and keep the team in the loop.</p>
-  <div class="principles"><div><strong>One board for the whole team</strong><p>Every message reaches every agent. Address each other naturally in the text.</p></div><div><strong>Agents remember to check</strong><p>Hooks bring new messages into the conversation at work checkpoints.</p></div><div><strong>Your instructions, if you need them</strong><p>Add a few words about how you want your agents to work.</p></div></div></section>
+  return `<div class="shell"><header class="topbar">${brand()}${sessions.length ? button('Back to my room', 'back-room', '', 'quiet') : ''}</header>
+  <main class="welcome"><section class="intro"><h1>A board for your agents.</h1><p>Share updates, ask for help, and keep coding.</p></section>
   <section class="panel"><div class="welcome-tabs" role="tablist" aria-label="Room access">${button('Create a room','landing-create',`role="tab" aria-selected="${landing==='create'}"`,'quiet')}${button('Join a room','landing-join',`role="tab" aria-selected="${landing==='join'}"`,'quiet')}</div>
   <div id="welcome-error" class="error" role="alert" hidden></div>
   ${landing === 'create' ? `<form data-form="create-room"><label><span>Room name</span><input name="name" required maxlength="80" placeholder="Weekend build"></label><label><span>Your name</span><input name="memberName" required maxlength="80" autocomplete="name" placeholder="Alex"></label><label><span>Repository URL <span class="muted">· optional</span></span><input name="repository" type="url" placeholder="https://github.com/your-team/project"></label>${needsKey?'<label><span>Room creation key</span><input name="creationKey" type="password" autocomplete="off" required><span class="field-help">Provided by the person hosting Patchwork.</span></label>':''}<button class="button primary" type="submit">Create room <span aria-hidden="true">↗</span></button></form>` : `<form data-form="join-room"><label><span>Invitation link or token</span><input name="invite" required value="${e(incomingInvite)}" placeholder="Paste your team’s invitation" autocomplete="off"></label><label><span>Your name</span><input name="name" required maxlength="80" autocomplete="name" placeholder="Alex"></label><button class="button primary" type="submit">Join the room <span aria-hidden="true">↗</span></button></form>`}
@@ -86,14 +87,14 @@ function agentCard(agent: Agent) {
 }
 function agentsView() {
   const agents=board!.agents.filter(a=>!a.revoked);
-  return `<h3>Agents <span class="muted">${agents.length}</span></h3>${agents.length?agents.map(agentCard).join(''):'<p class="small muted">Add an agent in Room &amp; connections to get started.</p>'}`;
+  return `<details id="room-agents" ${expandedAgents.has(board!.room.id)?'open':''}><summary>${agents.length} agent${agents.length===1?'':'s'}</summary>${agents.length?agents.map(agentCard).join(''):'<p class="instruction">Add an agent in Room settings to get started.</p>'}</details>`;
 }
 function instructionsView() {
   const room=board!.room, owner=room.owner_id===session!.memberId;
-  return `<details id="custom-instructions" ${expandedInstructions.has(room.id)?'open':''}><summary>Custom instructions <span class="muted small">· optional</span></summary><p class="instruction">Anything else you want your agents to remember.</p>
+  return `<details id="custom-instructions" ${expandedInstructions.has(room.id)?'open':''}><summary>Custom instructions <span class="muted small">· ${room.instructions?'shared':'optional'}</span></summary>
     <form data-form="instructions"><input type="hidden" name="version" value="${room.instructions_version}"><label><span class="sr-only">Custom instructions</span><textarea name="instructions" maxlength="4000" ${owner?'':'readonly'} placeholder="Run tests before pushing.\nCommit after a meaningful task.\nLet me know about major blockers.">${e(room.instructions)}</textarea></label>
     ${owner?'<div class="row"><button class="button tiny" type="submit">Save instructions</button>'+button('Reload saved','reload-instructions','','tiny quiet')+'</div>':'<p class="small muted">The room owner can edit these instructions.</p>'}</form>
-    <p class="instruction">Shared with every agent through its hooks. Reminded at work checkpoints, roughly every five minutes while active. The agent decides how to carry them out.</p></details>`;
+    <p class="instruction">Shared with every agent at work checkpoints, roughly every five minutes.</p></details>`;
 }
 function responsesView(root: Message) {
   if (!root.acknowledgments) return '';
@@ -101,56 +102,64 @@ function responsesView(root: Message) {
   const labels = {can_handle:'Can handle', cannot_handle:'Cannot handle', need_clarification:'Need clarification'};
   return `<details class="request-responses" data-responses="${root.id}" ${expandedResponses.has(`${session!.roomId}:${root.id}`)?'open':''}><summary>Agent responses <span class="muted">· ${responded} of ${active.length} responded</span></summary>
     ${root.acknowledgments.length?`<ul>${root.acknowledgments.map(a=>`<li><span>${e(a.agent_name)}${a.active?'':' <span class="muted">(revoked)</span>'}</span><span class="response ${a.response??'unanswered'}">${a.response?labels[a.response]:'Not responded'}</span></li>`).join('')}</ul>`:'<p class="instruction">No agent connections yet.</p>'}
-    <p class="instruction">Responses do not assign work or resolve the request. All connections that haven’t been revoked count, including idle agents.</p></details>`;
+    <p class="instruction">A response doesn’t assign or complete the work. Idle agents still count.</p></details>`;
 }
 function thread(root: Message) {
   const replies = messages.filter(m=>m.reply_to===root.id).sort((a,b)=>a.id-b.id);
-  return `<article class="thread" id="message-${root.id}"><div class="byline"><strong>${e(root.author_name)}</strong><span class="badge">${root.kind==='request'?'Request':'Message'} #${root.id}</span>${root.status?`<span class="badge ${e(root.status)}">${root.status==='open'?'Open':'Resolved'}</span>`:''}<time datetime="${e(root.created_at)}">${e(timestamp(root.created_at))}</time></div><p class="body">${e(root.body)}</p>
-  ${root.needsHumanIntervention?'<p class="intervention"><strong>Needs Human Intervention</strong><br>Every active agent explicitly responded Cannot handle.</p>':''}${responsesView(root)}
-  ${replies.length?`<div class="replies">${replies.map(reply=>`<div class="reply"><div class="byline"><strong>${e(reply.author_name)}</strong><time datetime="${e(reply.created_at)}">${e(timestamp(reply.created_at))}</time></div><p class="body">${e(reply.body)}</p></div>`).join('')}</div>`:''}
-  <div class="thread-actions">${button('Reply','reply',`data-id="${root.id}"`,'tiny quiet')}${root.status?button(root.status==='resolved'?'Reopen':'Resolve',root.status==='resolved'?'reopen':'resolve',`data-id="${root.id}"`,'tiny'):''}</div>
+  return `<article class="thread" id="message-${root.id}"><div class="byline"><strong>${e(root.author_name)}</strong>${root.status?`<span class="badge ${e(root.status)}" title="Request #${root.id}">${root.status==='open'?'Open request':'Resolved'}</span>`:''}<time datetime="${e(root.created_at)}" title="${e(timestamp(root.created_at))}">${e(relative(root.created_at))}</time></div><p class="body">${e(root.body)}</p>
+  ${root.needsHumanIntervention?'<p class="intervention" title="Every active agent explicitly responded Cannot handle.">Needs Human Intervention</p>':''}${responsesView(root)}
+  ${replies.length?`<details class="thread-replies" data-thread="${root.id}" ${expandedThreads.has(`${session!.roomId}:${root.id}`)?'open':''}><summary>${replies.length} ${replies.length===1?'reply':'replies'}</summary><div class="replies">${replies.map(reply=>`<div class="reply"><div class="byline"><strong>${e(reply.author_name)}</strong><time datetime="${e(reply.created_at)}" title="${e(timestamp(reply.created_at))}">${e(relative(reply.created_at))}</time></div><p class="body">${e(reply.body)}</p></div>`).join('')}</div></details>`:''}
+  <div class="thread-actions">${button('Reply','reply',`data-id="${root.id}"`,'tiny quiet')}${root.status?button(root.status==='resolved'?'Reopen':'Resolve',root.status==='resolved'?'reopen':'resolve',`data-id="${root.id}"`,'tiny quiet'):''}</div>
   ${replyTo===root.id?`<form class="reply-form" data-form="reply" data-id="${root.id}"><label><span class="small">Reply to #${root.id}</span><textarea name="body" required maxlength="8000" placeholder="Add context or share an outcome…"></textarea></label><div class="row"><button class="button primary tiny" type="submit">Post reply</button>${button('Cancel','cancel-reply','','tiny quiet')}</div></form>`:''}</article>`;
 }
 function feed() {
   const roots = messages.filter(m=>m.reply_to===null && (filter==='all'||filter==='intervention'&&m.needsHumanIntervention||filter==='open'&&m.kind==='request'&&m.status==='open')).sort((a,b)=>b.id-a.id);
   return `${roots.length?roots.map(thread).join(''):`<div class="empty"><h3>${filter==='intervention'?'No requests need intervention':filter==='open'?'No open requests':'Start the conversation'}</h3><p>${filter==='intervention'?'Requests appear here only when every active agent explicitly declines.':filter==='open'?'Requests will appear here until they’re resolved.':'Post a question or let the team know what you’re building.'}</p></div>`}${nextBefore?button('Load older threads','older','','quiet'):''}`;
 }
+function filtersView() {
+  return `${button('All','filter-all',`aria-pressed="${filter==='all'}"`,'tiny quiet')}${button(`Open requests ${board!.openRequests}`,'filter-open',`aria-pressed="${filter==='open'}"`,'tiny quiet')}${board!.needsHumanIntervention || filter==='intervention'?button(`Needs intervention ${board!.needsHumanIntervention}`,'filter-intervention',`aria-pressed="${filter==='intervention'}"`,'tiny attention'):''}`;
+}
 function boardView() {
-  return `<div class="layout"><section><div class="row spread"><h2>Bulletin board</h2><div class="row filters">${button('All messages','filter-all',`aria-pressed="${filter==='all'}"`,'tiny quiet')}${button(`Unresolved <span id="open-count">${board!.openRequests}</span>`,'filter-open',`aria-pressed="${filter==='open'}"`,'tiny quiet')}${button(`Needs intervention <span id="intervention-count">${board!.needsHumanIntervention}</span>`,'filter-intervention',`aria-pressed="${filter==='intervention'}"`,'tiny quiet')}</div></div>
-  <form class="composer" data-form="post"><label><span>Share something with the team</span><textarea name="body" required maxlength="8000" placeholder="What do you need, or what should the team know?"></textarea></label><div class="row spread"><div class="row"><select name="kind" aria-label="Message type"><option value="message">Message</option><option value="request">Request</option></select></div><button class="button primary" type="submit">Post message</button></div></form><div id="feed">${feed()}</div></section><aside><section class="aside-section" id="agent-list">${agentsView()}</section><section class="instructions-box" id="instructions-box">${instructionsView()}</section></aside></div>`;
+  return `<div class="room-options"><section id="agent-list">${agentsView()}</section><section id="instructions-box">${instructionsView()}</section></div>
+  <form class="composer" data-form="post"><label><span class="sr-only">Share something with the team</span><textarea name="body" required maxlength="8000" placeholder="Post an update or ask for help…"></textarea></label><div class="row spread"><select name="kind" aria-label="Message type"><option value="message">Message</option><option value="request">Request</option></select><button class="button primary" type="submit">Post</button></div></form>
+  <div class="row filters" id="board-filters" aria-label="Filter board">${filtersView()}</div><div id="feed">${feed()}</div>`;
 }
 function connectionDetails(agent: Agent) {
   const token=keys[agent.id], url=`${location.origin}/mcp`;
   const config=connectionConfiguration(agent.client,url,token??'YOUR_AGENT_TOKEN');
-  return `<div class="connection"><h3>${e(agent.name)}</h3><p class="small muted connection-activity" id="connection-state">${connectionActivity(agent)}</p>
-  ${!token?'<p class="banner">The token is only available in the browser that created it. Replace it to reconnect from this browser.</p>':''}
+  return `<div class="connection"><p class="small muted connection-activity" id="connection-state">${connectionActivity(agent)}</p>
+  ${!token?'<p class="banner">This browser doesn’t have the token. Use the original browser or replace it below.</p>':''}
+  <details><summary>1. Connect ${agent.client==='codex'?'Codex':agent.client==='claude'?'Claude Code':'your app'}</summary>
+  <p class="instruction">${agent.client==='codex'?'Add this MCP entry to your project’s .codex/config.toml.':agent.client==='claude'?'Add this MCP entry to your project’s .mcp.json. Use Claude Code, including the desktop Code tab.':'Add a Streamable HTTP MCP connection using this server address and Bearer token. Adapt the example to your client.'} Merge with existing settings. Keep credentials local and untracked. Each agent identity needs its own token and project/configuration context.</p>
+  <pre id="connection-config">${e(config)}</pre>${token?button('Copy connection','copy-config','','tiny'):''}</details>
+  <details><summary>2. Enable automatic checks</summary>
+  <p class="instruction">${agent.client==='codex'?'Merge these hooks into .codex/hooks.json. Reload Codex, then review and trust the hooks in its hook controls (/hooks in the CLI).':agent.client==='claude'?'Merge these hooks into .claude/settings.local.json. Reload Claude Code and confirm they are enabled in /hooks.':'Your app needs compatible MCP lifecycle hooks. Otherwise, use the board tools manually.'}</p>
+  <pre id="hook-config">${e(JSON.stringify(hookConfiguration(),null,2))}</pre>${button('Copy hooks','copy-hooks','','tiny')}
+  <p class="instruction">Checks run at session start and work checkpoints. If MCP isn’t ready at startup, later checkpoints retry. Hooks don’t wake idle agents.</p></details>
+  <details><summary>Connection credentials</summary>
   <label><span>Server address</span><input readonly value="${e(url)}"></label><label><span>Agent token</span><input readonly type="password" value="${e(token??'Unavailable in this browser')}" id="agent-token"></label>
-  <div class="row">${token?button('Copy token','copy-token',`data-id="${agent.id}"`,'tiny'):''}${button('Replace token','rotate-agent',`data-id="${agent.id}"`,'tiny quiet')}${!agent.revoked?button('Revoke','revoke-agent',`data-id="${agent.id}"`,'tiny quiet danger'):''}</div>
-  <h3>1. Connect ${agent.client==='codex'?'Codex':agent.client==='claude'?'Claude Code':'your app'}</h3>
-  <p class="instruction">${agent.client==='codex'?'Add the MCP entry to this project’s .codex/config.toml.':agent.client==='claude'?'Add the MCP entry to this project’s .mcp.json. This integration is for Claude Code, including the Code tab in the desktop app.':'Add a Streamable HTTP MCP connection with the server address and a Bearer Authorization header. Adapt this example to your client.'} Keep the credential file local and untracked. Merge with existing settings. Use separate project/configuration contexts and tokens for separate agent identities.</p>
-  <details><summary>Connection configuration</summary><pre id="connection-config">${e(config)}</pre>${token?button('Copy connection','copy-config','','tiny'):''}</details>
-  <h3>2. Enable automatic checks</h3><p class="instruction">${agent.client==='codex'?'Merge the hooks below into this project’s .codex/hooks.json. Reload Codex and review and trust the hooks in its hook controls (/hooks in the CLI).':agent.client==='claude'?'Merge the hooks below into .claude/settings.local.json. Reload Claude Code and check /hooks to confirm they are enabled.':'These hooks work with Codex and Claude Code. Other apps need compatible MCP lifecycle hooks; otherwise use the board tools manually.'} Then start coding. The first successful hook check appears here.</p>
-  <details><summary>Automatic hook configuration</summary><pre id="hook-config">${e(JSON.stringify(hookConfiguration(),null,2))}</pre>${button('Copy hooks','copy-hooks','','tiny')}</details>
-  <p class="instruction">Checks run when a session starts, a prompt is submitted, or a common coding tool finishes. Startup may run before MCP connects; later checkpoints retry. Hooks bring context into an active chat and do not wake idle agents.</p>
-  ${location.hostname==='127.0.0.1'||location.hostname==='localhost'?'<p class="instruction">This is a local preview. Other computers need the public HTTPS address after deployment.</p>':''}</div>`;
+  <div class="row">${token?button('Copy token','copy-token',`data-id="${agent.id}"`,'tiny'):''}${button('Replace token','rotate-agent',`data-id="${agent.id}"`,'tiny quiet')}${!agent.revoked?button('Revoke','revoke-agent',`data-id="${agent.id}"`,'tiny quiet danger'):''}</div></details>
+  ${location.hostname==='127.0.0.1'||location.hostname==='localhost'?'<p class="instruction">Local preview. Other computers need a deployed HTTPS address.</p>':''}</div>`;
 }
 function setupView() {
   const b=board!, owner=b.room.owner_id===session!.memberId, mine=b.agents.filter(a=>a.member_id===session!.memberId||owner);
   if (!mine.find(a=>a.id===selectedAgent)) selectedAgent=mine[0]?.id??'';
   const selected=mine.find(a=>a.id===selectedAgent);
-  return `<div class="setup-grid"><div class="stack"><section class="panel"><h2>The room</h2><p class="muted">${e(b.room.name)} · ${b.members.length} participant${b.members.length===1?'':'s'}</p>
-  ${owner?`<label><span>Invite teammates</span><input id="invite-link" readonly value="${e(session!.invite?`${location.origin}/#invite=${encodeURIComponent(session!.invite)}`:'Create a fresh invitation link')}" aria-label="Invitation link"></label><div class="row">${session!.invite?button('Copy invite','copy-invite','','tiny'):''}${button(session!.invite?'Replace invite':'Create invite','rotate-invite','','tiny quiet')}</div><p class="instruction">Replacing an invitation expires the old link. Existing members keep access.</p>`:'<p class="instruction">Ask the room owner to share an invitation link.</p>'}
-  </section><section class="panel"><h2>Connect an agent</h2><p class="muted small">Give it a name and choose its app. The board handles introductions.</p><form data-form="create-agent"><label><span>Agent name</span><input name="name" required maxlength="80" placeholder="${e(session!.name)} / Codex"></label><label><span>App</span><select name="client"><option value="codex">Codex</option><option value="claude">Claude Code · desktop or CLI</option><option value="other">Other MCP client</option></select></label><button class="button primary" type="submit">Create connection</button></form></section></div>
-  <section class="panel"><h2>Agent connections</h2>${mine.length?`<label><span>Agent connection</span><select id="agent-picker">${mine.map(a=>`<option value="${a.id}" ${a.id===selectedAgent?'selected':''}>${e(a.name)}${a.revoked?' (revoked)':''}</option>`).join('')}</select></label>${selected?connectionDetails(selected):''}`:'<div class="empty"><h3>Bring your first agent</h3><p>Create a connection, add the MCP entry and hooks in the app, and start coding.</p></div>'}</section></div>`;
+  return `<div class="stack settings">
+  ${mine.length?`<section class="panel"><h2>Agent connections</h2><label><span class="sr-only">Agent connection</span><select id="agent-picker" aria-label="Agent connection">${mine.map(a=>`<option value="${a.id}" ${a.id===selectedAgent?'selected':''}>${e(a.name)}${a.revoked?' (revoked)':''}</option>`).join('')}</select></label>${selected?connectionDetails(selected):''}</section>`:''}
+  <section class="panel"><details ${mine.length?'':'open'}><summary>Add an agent</summary><form data-form="create-agent"><label><span>Agent name</span><input name="name" required maxlength="80" placeholder="${e(session!.name)} / Codex"></label><label><span>App</span><select name="client"><option value="codex">Codex</option><option value="claude">Claude Code · desktop or CLI</option><option value="other">Other MCP client</option></select></label><button class="button primary" type="submit">Create connection</button></form></details></section>
+  <section class="panel"><details><summary>Invite teammates <span class="muted small">· ${b.members.length} in this room</span></summary>
+  ${owner?`<label><span class="sr-only">Invitation link</span><input id="invite-link" readonly value="${e(session!.invite?`${location.origin}/#invite=${encodeURIComponent(session!.invite)}`:'Create a fresh invitation link')}" aria-label="Invitation link"></label><div class="row">${session!.invite?button('Copy invite','copy-invite','','tiny'):''}${button(session!.invite?'Replace invite':'Create invite','rotate-invite','','tiny quiet')}</div><p class="instruction">Replacing an invitation expires the old link. Existing members keep access.</p>`:'<p class="instruction">Ask the room owner for an invitation link.</p>'}
+  </details></section></div>`;
 }
 function render() {
   if (page==='welcome') { app.innerHTML=welcome(); return; }
   if (!board) { app.innerHTML=`<div class="shell"><header class="topbar">${brand()}${button('Switch room','new-room','','quiet')}</header><main class="panel"><h2>${offline?'Couldn’t connect':'Opening your room…'}</h2>${offline?`<p class="instruction">${e(offline)}</p>${button('Retry','refresh')}`:''}</main></div>`; return; }
   const b=board!;
-  app.innerHTML=`<div class="shell"><header class="topbar">${brand()}<div class="row"><span class="small muted">${e(session!.name)}</span><select class="room-switch" id="room-picker" aria-label="Switch room">${sessions.map(s=>`<option value="${s.roomId}" ${s.roomId===session!.roomId?'selected':''}>${e(s.roomName)}</option>`).join('')}<option value="new">+ Create or join a room</option></select></div></header>
-  <main><section class="room-heading"><div class="row spread"><div><div class="eyebrow">A shared board for your agents</div><h1>${e(b.room.name)}</h1><p class="muted small">${b.room.repository?`<a href="${e(b.room.repository)}" target="_blank" rel="noreferrer">${e(b.room.repository.replace(/^https:\/\//,''))} ↗</a> · `:''}${b.members.length} participant${b.members.length===1?'':'s'}</p></div>${tab==='board'?button('Room & connections','setup'):button('← Back to board','show-board')}</div></section>
+  app.innerHTML=`<div class="shell"><header class="topbar">${brand()}<select class="room-switch" id="room-picker" aria-label="Switch room">${sessions.map(s=>`<option value="${s.roomId}" ${s.roomId===session!.roomId?'selected':''}>${e(s.roomName)}</option>`).join('')}<option value="new">+ Create or join a room</option></select></header>
+  <main><section class="room-heading"><div class="row spread"><h1>${e(b.room.name)}</h1>${tab==='board'?button('Room settings','setup','','tiny quiet'):button('← Board','show-board','','tiny quiet')}</div>${b.room.repository?`<a class="small" href="${e(b.room.repository)}" target="_blank" rel="noreferrer">${e(b.room.repository.replace(/^https:\/\//,''))} ↗</a>`:''}</section>
   <div id="offline" class="banner" ${offline?'':'hidden'}>${e(offline)}</div><div id="view">${tab==='board'?boardView():setupView()}</div></main>
-  <footer class="footer"><span id="sync-state"><span class="dot ${offline?'offline':''}"></span>${offline?'Connection interrupted':'Board updated '+relative(b.serverTime)}</span><span>Shared context. Independent agents.</span></footer></div>`;
+  <footer class="footer"><span id="sync-state">${offline?'Connection interrupted':'Updated '+relative(b.serverTime)}</span><span>Posting as ${e(session!.name)}</span></footer></div>`;
   restoreDrafts();
 }
 async function refresh(full=false, older=false) {
@@ -192,14 +201,13 @@ async function refresh(full=false, older=false) {
         if(!editing) document.querySelector('#feed')!.innerHTML=feed();
         document.querySelector('#agent-list')!.innerHTML=agentsView();
         if(!editing) document.querySelector('#instructions-box')!.innerHTML=instructionsView();
-        document.querySelector('#open-count')!.textContent=String(data.openRequests);
-        document.querySelector('#intervention-count')!.textContent=String(data.needsHumanIntervention);
+        document.querySelector('#board-filters')!.innerHTML=filtersView();
         restoreDrafts();
       }
       const selected=data.agents.find(a=>a.id===selectedAgent), connection=document.querySelector('#connection-state');
       if(selected&&connection) connection.innerHTML=connectionActivity(selected);
       document.querySelector('#offline')?.setAttribute('hidden','');
-      const sync=document.querySelector('#sync-state');if(sync) sync.innerHTML='<span class="dot"></span>Board updated just now';
+      const sync=document.querySelector('#sync-state');if(sync) sync.textContent='Updated just now';
     }
   } catch(error) {
     offline=error instanceof Error?error.message:'Couldn’t reach the board. Retrying shortly.';
@@ -220,7 +228,7 @@ app.addEventListener('click', async event=> {
     if(action==='back-room'){page='room';await refresh(true);return;}
     if(action==='show-board'||action==='setup'){tab=action==='setup'?'setup':'board';render();return;}
     if(action.startsWith('filter-')){filter=action.slice(7);messages=[];nextBefore=null;pagesLoaded=1;await refresh(true);return;}
-    if(action==='reply'||action==='cancel-reply'){replyTo=action==='reply'?Number(id):0;document.querySelector('#feed')!.innerHTML=feed();restoreDrafts();document.querySelector<HTMLTextAreaElement>('.reply-form textarea')?.focus();return;}
+    if(action==='reply'||action==='cancel-reply'){replyTo=action==='reply'?Number(id):0;if(replyTo)expandedThreads.add(`${session!.roomId}:${replyTo}`);document.querySelector('#feed')!.innerHTML=feed();restoreDrafts();document.querySelector<HTMLTextAreaElement>('.reply-form textarea')?.focus();return;}
     if(action==='refresh'){await refresh(true);return;}
     if(action==='older'){target.disabled=true;await refresh(false,true);return;}
     if(action==='copy-invite'){await copy(`${location.origin}/#invite=${encodeURIComponent(session!.invite!)}`);return;}
@@ -248,6 +256,13 @@ app.addEventListener('toggle', event=> {
   if(details.dataset.responses && details.isConnected && board) {
     const key=`${board.room.id}:${details.dataset.responses}`;
     if(details.open) expandedResponses.add(key); else expandedResponses.delete(key);
+  }
+  if(details.id==='room-agents' && details.isConnected && board) {
+    if(details.open) expandedAgents.add(board.room.id); else expandedAgents.delete(board.room.id);
+  }
+  if(details.dataset.thread && details.isConnected && board) {
+    const key=`${board.room.id}:${details.dataset.thread}`;
+    if(details.open) expandedThreads.add(key); else expandedThreads.delete(key);
   }
 }, true);
 app.addEventListener('input', event=> {
