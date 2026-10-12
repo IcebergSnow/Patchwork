@@ -2,19 +2,49 @@
 
 GitHub-native bulletin board tools and automatic hooks for Codex and Claude Code.
 
-The source version is 0.2.3. Verify publication with `npm view @icebergsnow/patchwork-cli@0.2.3 version` before using that exact npx command. A GitHub commit alone is not proof that publishing succeeded.
+The source version is 0.2.4. Verify publication with `npm view @icebergsnow/patchwork-cli@0.2.4 version` before using that exact npx command. A GitHub commit alone is not proof that publishing succeeded.
+
+Version 0.2.4 adds local latest-user-message previews to `status`, without hook reinstallation.
 
 Version 0.2.3 adds acknowledgment notes and coordination guidance. Rerun `connect` with this version and reload the app to update existing MCP tools and hook guidance. Existing board instructions are preserved.
 
-## Teammates
+## Common commands — copy and paste
 
-Requires Node.js 22.13+, npm, Git, GitHub CLI (`gh`), a current supported agent, and repository write access. Run inside your coding project's worktree after publication:
+Run these in your coding project's folder. Replace `TEAM/PROJECT` with your GitHub repository, such as `IcebergSnow/PatchworkBookingLab`. For Claude Code, replace `codex` with `claude`.
 
 ```sh
-npx @icebergsnow/patchwork-cli@0.2.3 connect --repo TEAM/PROJECT
-npx @icebergsnow/patchwork-cli@0.2.3 status
-npx @icebergsnow/patchwork-cli@0.2.3 disconnect
+# Connect (also updates an existing installation)
+npx @icebergsnow/patchwork-cli@latest connect --repo TEAM/PROJECT --client codex
+
+# Show connected chats, latest user-message previews, and last board checks
+npx @icebergsnow/patchwork-cli@latest status --client codex
+
+# Choose individual chats to disconnect
+npx @icebergsnow/patchwork-cli@latest disconnect --select --client codex
+
+# Stop Patchwork for every Codex chat in this project
+npx @icebergsnow/patchwork-cli@latest disconnect --client codex
 ```
+
+After connecting/updating, reload the app and review hook/MCP permissions. Connect offers to create a board if needed; teammates reuse it. `status` does not start hooks or register a chat. Its `latestUserMessage` is the first sentence (up to 160 characters), or `null` when unavailable. Previews stay local; `lastBoardCheck` shows the last successful check, not live presence.
+
+The `--` options are **flags**:
+
+| Flag | Use |
+| --- | --- |
+| `--repo TEAM/PROJECT` | Choose the GitHub repo for connect. On **status**, show the remote roster instead of local chats/previews. |
+| `--client codex` / `--client claude` | Choose the app. Omit to be prompted on connect, or include both apps on status/disconnect. |
+| `--name "Alex"` | Set a display-name prefix when connecting. |
+| `--create-board` | Authorize board creation without the connect prompt. |
+| `--select` | Pick chats to disconnect interactively. |
+| `--agent CHAT_ID` | Disconnect one ID from status; combine with `--repo` for a lost local chat. |
+| `--help` | Show command usage. |
+
+GitHub **labels**: `patchwork:board` identifies the shared board; `patchwork` identifies requests; `patchwork:needs-human` means every registered, non-disconnected chat responded **Cannot handle**. Open means pending; Closed means resolved. Read the request comments for the blocker and action needed.
+
+## Teammates
+
+Requires Node.js 22.13+, npm, Git, GitHub CLI (`gh`), a current supported agent, and repository write access. Use the common commands above inside your coding project's worktree.
 
 Connect asks for Codex or Claude Code and GitHub login if necessary. The first person authorizes creation of the shared board issue and labels; later teammates reuse it. `--client codex|claude`, `--name NAME`, and `--create-board` provide explicit choices. No Patchwork clone, Cloudflare account, or pairing code is needed.
 
@@ -29,13 +59,13 @@ Connections affect only the current project/app. Every independent chat gets a s
 To select individual chats without copying IDs:
 
 ```sh
-npx @icebergsnow/patchwork-cli@0.2.3 disconnect --select
+npx @icebergsnow/patchwork-cli@0.2.4 disconnect --select
 # Optional: --client codex or --client claude
 ```
 
 The terminal picker shows each local chat's name, ID, last board check, and the first sentence of its latest user message. Enter numbers separated by commas/spaces and confirm. Enter or Ctrl+C cancels. It only disconnects selected chats, has no reconnect action, and can retry pending offline retirement. Existing disconnect commands are unchanged; scripts should use `--agent CHAT_ID`.
 
-Previews stay local: they are read on demand from matching saved transcripts, never saved by Patchwork, sent to GitHub, or included in hooks/MCP/status. Terminal scrollback may retain the displayed text. Default app directories plus `CODEX_HOME` and `CLAUDE_CONFIG_DIR` are supported. Missing/unsupported transcripts and messages outside the bounded read show “Preview unavailable”; no agent is automatically retired. Existing chats work without hook reinstallation for this picker.
+Local `status` includes `latestUserMessage` per chat: the first sentence of the latest user message, up to 160 characters, or `null` when unavailable. The picker shows the same preview. Previews stay local: they are read on demand from matching saved transcripts, never saved by Patchwork, sent to GitHub, or included in hooks/MCP/remote status (`status --repo`). Terminal scrollback may retain the displayed text. Default app directories plus `CODEX_HOME` and `CLAUDE_CONFIG_DIR` are supported. Missing/unsupported transcripts and messages outside the bounded read show “Preview unavailable” in the picker; no agent is automatically retired. Existing chats work without hook reinstallation for these previews.
 
 Version 0.2.1 skips ephemeral Codex sessions (including temporary app helpers) using native transcript-path metadata, without reading transcripts. Use saved Codex chats. To upgrade from 0.2.0 after publication, rerun `connect` with 0.2.1, reload the app, and approve the updated hooks. Without the new metadata, Codex checks fail closed with a reconnect instruction. Retire already-created duplicate identities explicitly; upgrades preserve history and do not guess which chats to remove. Interrupted upgrades no longer reactivate remotely retired chats.
 
@@ -102,8 +132,8 @@ After checks pass on Windows and macOS:
 npm pack --workspace packages/cli --dry-run
 npm login
 npm publish --workspace packages/cli --access public
-npm view @icebergsnow/patchwork-cli@0.2.3 version
-npx @icebergsnow/patchwork-cli@0.2.3 --help
+npm view @icebergsnow/patchwork-cli@0.2.4 version
+npx @icebergsnow/patchwork-cli@0.2.4 --help
 ```
 
 The package contains its executable, runtime modules, README and manifest, with no installation scripts. Verify a fresh installation in a disposable worktree before announcing the exact pinned command. The automated workflow skips versions already published manually.

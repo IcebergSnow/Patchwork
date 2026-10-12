@@ -1,17 +1,13 @@
 import { createInterface } from "node:readline/promises";
 import { projectRoot, status, disconnect } from "./connect.js";
 import { connectionFile, readJSON } from "./store.js";
-import { stateFile } from "./runtime.js";
-import { chatPreviews, displayText } from "./previews.js";
+import { displayText } from "./previews.js";
 
 export async function disconnectChoices({ cwd, client, env } = {}) {
   const root = await projectRoot(cwd);
   const choices = [];
-  for (const group of await status({ cwd: root, client })) {
-    const sessions = await readJSON(stateFile(connectionFile(root, group.client)));
-    const hashes = new Map(Object.entries(sessions?.chats || {}).map(([hash, chat]) => [chat.id, hash]));
+  for (const group of await status({ cwd: root, client, env })) {
     const eligible = group.chats.filter(chat => chat.enabled || chat.pendingRetirement);
-    const previews = await chatPreviews(group.client, new Set(eligible.map(chat => hashes.get(chat.id)).filter(Boolean)), env);
     for (const chat of eligible) choices.push({
       id: chat.id,
       client: group.client,
@@ -19,7 +15,7 @@ export async function disconnectChoices({ cwd, client, env } = {}) {
       name: chat.name,
       lastBoardCheck: chat.lastBoardCheck,
       pendingRetirement: chat.pendingRetirement,
-      preview: previews.get(hashes.get(chat.id)) || null,
+      preview: chat.latestUserMessage,
     });
   }
   return { root, choices };

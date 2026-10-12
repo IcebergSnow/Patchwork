@@ -24,6 +24,7 @@ import { mergeCodex, mergeClaude, mergeHooks, parseConfig } from "./config.js";
 import { hookConfiguration, serverConfiguration } from "./connections.js";
 import { disabledFile, stateFile } from "./runtime.js";
 import { withBoard, accountFile } from "./sync.js";
+import { chatPreviews } from "./previews.js";
 export const ENTRY = fileURLToPath(
   new URL("../bin/patchwork.js", import.meta.url),
 );
@@ -275,7 +276,7 @@ async function remoteBoard(repo, github, fn) {
     return fn({ gh, sync, c, user });
   });
 }
-export async function status({ cwd, client, repo, github } = {}) {
+export async function status({ cwd, client, repo, github, env } = {}) {
   if (repo)
     return remoteBoard(repo, github, async ({ sync }) => {
       const state = await sync.view();
@@ -293,6 +294,8 @@ export async function status({ cwd, client, repo, github } = {}) {
       c = await readJSON(file);
     if (!c) continue;
     const sessions = await readJSON(stateFile(file));
+    const chats = Object.entries(sessions?.chats || {});
+    const previews = await chatPreviews(app, new Set(chats.map(([hash]) => hash)), env);
     let configured = false;
     try {
       const config = await read(c.files.config),
@@ -320,9 +323,10 @@ export async function status({ cwd, client, repo, github } = {}) {
       board: c.boardUrl,
       enabled: c.enabled && !(await read(disabledFile(file))),
       chats: await Promise.all(
-        Object.values(sessions?.chats || {}).map(async (a) => ({
+        chats.map(async ([hash, a]) => ({
           id: a.id,
           name: a.name,
+          latestUserMessage: previews.get(hash) || null,
           enabled:
             c.enabled &&
             !(await read(disabledFile(file))) &&

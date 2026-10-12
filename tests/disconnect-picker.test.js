@@ -111,19 +111,43 @@ async function setup(t) {
     const transcript_path = await transcript(appHome, "codex", id, [codexUser(`Private task ${id}. Not for GitHub.`)]);
     await runtime.hook({ session_id: id, transcript_path, hook_event_name: "SessionStart" });
   }
-  return { root, dir, gh, file, runtime, env: { CODEX_HOME: appHome }, chats: Object.values((await readJSON(stateFile(file))).chats) };
+  return { root, dir, gh, file, runtime, ids, env: { CODEX_HOME: appHome }, chats: Object.values((await readJSON(stateFile(file))).chats) };
 }
 
-test("picker uses existing chats without hook updates; previews are read-only, local, and absent from normal status", async t => {
+test("status and picker share read-only local previews without exposing chat keys or uploading messages", async t => {
   const x = await setup(t), before = await read(stateFile(x.file)), calls = x.gh.calls;
   const { choices } = await disconnectChoices({ cwd: x.root, env: x.env });
+  const groups = await status({ cwd: x.root, env: x.env });
   assert.equal(choices.length, 2);
-  assert(choices.every(c => c.preview.startsWith("Private task")));
+  for (const [i, chat] of groups[0].chats.entries()) {
+    assert.equal(chat.latestUserMessage, `Private task ${x.ids[i]}.`);
+    assert.equal(choices.find(c => c.id === chat.id).preview, chat.latestUserMessage);
+    assert(!Object.hasOwn(chat, "chat_key"));
+  }
   assert(choices.every(c => !Object.hasOwn(c, "chat_key")));
   assert.equal(await read(stateFile(x.file)), before);
-  assert.equal(x.gh.calls, calls, "opening the picker makes no GitHub calls");
-  assert(!JSON.stringify(await status({ cwd: x.root })).includes("Private task"));
+  assert.equal(x.gh.calls, calls, "local status and picker make no GitHub calls");
   assert(!JSON.stringify(x.gh.comments).includes("Private task"));
+  const remote = await status({ repo: x.gh.repo, github: x.gh, env: x.env });
+  assert(!JSON.stringify(remote).includes("Private task"));
+  assert(remote.agents.every(a => !Object.hasOwn(a, "latestUserMessage")));
+});
+
+test("CLI status reads the latest saved user message without waiting for a board check", async t => {
+  const x = await setup(t);
+  await transcript(x.env.CODEX_HOME, "codex", x.ids[0], [
+    codexUser("Previous task."), codexUser("Updated task! More details."),
+    { type: "event_msg", payload: { type: "agent_message", message: "Assistant output." } },
+  ]);
+  await transcript(x.env.CODEX_HOME, "codex", x.ids[1], [codexUser("Old task."), codexUser("")]);
+  const result = spawnSync(process.execPath, [ENTRY, "status", "--client", "codex"], {
+    cwd: x.root, env: { ...process.env, ...x.env }, encoding: "utf8",
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const chats = JSON.parse(result.stdout)[0].chats;
+  assert.deepEqual(chats.map(c => c.latestUserMessage), ["Updated task!", null]);
+  assert.equal(chats[0].lastBoardCheck, x.chats[0].lastSuccess);
+  assert(!result.stdout.includes(x.chats[0].chat_key));
 });
 
 test("picker filters apps, keeps missing previews selectable, and handles an empty project", async t => {
@@ -135,6 +159,11 @@ test("picker filters apps, keeps missing previews selectable, and handles an emp
   assert.equal(all.choices.length, 3);
   assert(all.choices.every(c => c.preview === null));
   assert.equal((await disconnectChoices({ cwd: x.root, client: "claude", env })).choices.length, 1);
+  await transcript(app, "claude", id, [claudeUser(id, "Build storage. More details.")]);
+  const filtered = await status({ cwd: x.root, client: "claude", env });
+  assert.equal(filtered.length, 1);
+  assert.equal(filtered[0].chats[0].latestUserMessage, "Build storage.");
+  assert((await status({ cwd: x.root, client: "codex", env }))[0].chats.every(c => c.latestUserMessage === null));
   const answers = ["1", "y"];
   await disconnectPicker({ cwd: x.root, client: "claude", env, github: x.gh, log: () => {}, ask: async () => answers.shift() });
   const groups = await status({ cwd: x.root });

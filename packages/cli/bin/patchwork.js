@@ -17,6 +17,7 @@ Usage (inside your coding project's Git worktree):
 
 Requires Node.js 22.13+, Git, GitHub CLI (gh), and repository write access.
 Connect affects chats in this project only. Each chat gets its own identity.
+Local status includes the first sentence of each chat's latest user message, when available.
 Disconnect without --agent or --select disables the selected app (both apps if omitted).
 Use disconnect --select to pick individual chats with local message previews.
 Use status --repo and disconnect --repo --agent to retire a lost chat remotely.
