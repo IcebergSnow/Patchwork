@@ -1,7 +1,7 @@
 # Hackathon simulator — Phase 0
 
 A two-agent native Codex hook preflight, separate from Patchwork's production
-runtime. **Phase 0 is pending a live request/acknowledgment trial.** The booking
+runtime. **Phase 0 is pending an authorized staged delivery trial.** The booking
 comparison is not implemented. Phase 1 requires separate user approval even if
 Phase 0 passes. No manual hook invocation counts as native delivery evidence.
 
@@ -79,7 +79,7 @@ For your own sandbox:
 ```sh
 npm run sim -- preflight --repo OWNER/TEST_REPO \
   --sandbox-repo --allow-live \
-  --model gpt-6-luna --reasoning low --seconds 300 --tokens 250000 \
+  --model gpt-6-luna --reasoning low --seconds 300 --tokens 300000 \
   --codex /path/to/codex
 ```
 
@@ -92,32 +92,96 @@ The next proposed test for this workspace is explicitly scoped to
 `IcebergSnow/PatchworkTesting`; its live execution is **awaiting authorization**.
 There is no permission to start Phase 1 afterward.
 
-The five-minute timer is shared by both sessions, starting when session launch
-begins. Setup and cleanup can take additional time. The 250,000-token stop
-threshold is aggregate reported usage, including cached input. An in-flight call
-can overshoot before accounting arrives. Missing usage remains unavailable rather
-than being estimated. The previous two-session trial reported 172,203 tokens,
-mostly cached input; that is a reference point, not a prediction for this test.
+The `--seconds` limit is configurable from 30 to 300 seconds, shared by both
+sessions starting at session launch. Setup and cleanup can take additional time.
+`--tokens` is a configurable aggregate reported-token stop threshold, including
+cached input (default 250,000; the proposed command above explicitly uses 300,000).
+An in-flight call can overshoot before accounting arrives. Missing usage remains
+unavailable rather than estimated. There is no automatic trial retry, model
+upgrade, or budget increase.
 
-### Required evidence
+### Staged test: six bounded turns
 
-1. Both real native SessionStart hooks register separate GitHub chat identities.
-2. Agent A (`sender`) uses real MCP `post_message` with `kind=request` and a unique
-   run marker. The runner does not manufacture the request.
-3. Agent B (`receiver`) gets that exact issue through native lifecycle context (normally PostToolUse;
-   startup/prompt delivery also counts if the request already exists).
-4. B uses real MCP `acknowledge_request` with `can_handle` for the same issue.
-5. A receives that exact acknowledgment comment through native PostToolUse.
-6. Remote records, separate chat IDs/keys, independent sessions and cursors, and
-   both received event IDs agree with the observed native events.
-7. Both chats are retired, the run-owned request is closed, and temporary
-   environments/processes are removed. Only then can `phase0Complete` be true.
+**UserPromptSubmit round trip**
 
-Agents use ordinary shell checkpoints; the runner never invokes internal hooks
-or calls board tools on their behalf. Manual board reads disqualify the test.
-The prompts prescribe this handshake only to test infrastructure, not to evaluate
-spontaneous hackathon collaboration. Acknowledgment is not resolution; closing the
-disposable request is explicit simulator cleanup after agents stop.
+1. B takes a brief READY turn. Its real SessionStart registers its identity.
+2. A's first turn registers through SessionStart, posts one unique request with
+   real MCP, and finishes immediately.
+3. The runner waits out the existing 15-second prompt cache if necessary, with
+   no model calls. A subsequent B prompt receives the request through the real
+   UserPromptSubmit hook. B acknowledges it through MCP and finishes.
+4. After another cache-safe local wait if necessary, a subsequent A prompt
+   receives the exact acknowledgment through UserPromptSubmit. A uses no tools.
+
+The receiving prompts contain neither the random message marker nor its issue
+or comment IDs. SessionStart or PostToolUse delivery cannot pass this path.
+
+**PostToolUse round trip, separately**
+
+5. B starts one genuine `sleep 65` shell command before the new request exists.
+   The runner waits for its actual command-start event before starting A.
+6. A posts a different, uniquely marked request through MCP, then executes one
+   `sleep 95` shell command in that same turn. B's command completion triggers
+   PostToolUse after the unchanged 60-second interval; B acknowledges through
+   MCP. A's later command completion must deliver that exact acknowledgment
+   through PostToolUse. Neither receives another user prompt during this exchange.
+
+The command durations are derived from the production interval plus 5 seconds
+for B and another 30 seconds for A's return path. Production polling and hook
+configuration are unchanged. A command may need one genuine `write_stdin` wait
+for its completion after `exec_command` yields. Prompts request one such wait,
+not repeated short sleeps. There is no background polling model and no direct
+runner invocation of hooks or board tools. A slow write that misses the single
+checkpoint remains a failed/inconclusive trial; the runner does not rescue it
+with another prompt or retry.
+
+### PASS requirements and resource estimate
+
+Overall PASS requires **both complete round trips**, both native registrations,
+independent sessions/identities/cursors, matching remote request and acknowledgment
+IDs, no manual board reads or unexpected commands, unchanged model/authentication,
+and successful cleanup. This is stricter than accepting either hook type as a
+substitute. Prompt-only success is reported separately and cannot complete Phase 0.
+
+The report records each hook's name, ID, source, turn, timestamp, request/ack IDs,
+per-turn usage, aggregate usage, cached input, overshoot, and shutdown diagnostics.
+Full usage increments stay in report.json and JSONL. Hooks do not independently
+report model tokens; usage is attributed to actual Codex turns, not invented
+per-hook costs. An unobserved path is NOT VERIFIED, not a claim that it failed in
+production.
+
+Planning estimate, **not a live measurement**: about 2–4 minutes of session time
+and roughly 200,000–350,000 reported tokens for both full round trips. The installed
+Codex context contributed 15,000–25,000 input tokens per decision in the last run.
+The new design targets about 14 model decisions, depending on command yielding,
+instead of continuously looping both agents. The 300,000-token proposal may still
+stop an expensive run; it is never raised automatically. A 100,000-token threshold
+remains supported but may not fit both complete paths. There is no reliable
+conversion from reported tokens to subscription-allowance percentage.
+
+### Why the last trial exhausted its budget
+
+Run `sim-2026-10-12T10-41-00-628Z-38a3735a` reported six increments:
+
+| Agent | Total-token increments | Total | Cached input |
+| --- | --- | ---: | ---: |
+| A | 15,101; 15,405; 15,512 | 46,018 | 40,192 |
+| B | 15,042; 25,227; 25,290 | 65,559 | 49,408 |
+
+Combined: 111,181 input tokens and only 396 output tokens; 89,600 of the input
+was cached. `sleep` itself did not consume model tokens: each repeated tool
+decision reprocessed the conversation/tool context. Cache hits still count toward
+our reported-token threshold. The logs do not identify exactly which hidden
+context component caused B's later input to grow to about 25,000 tokens.
+
+The last board check was at 10:41:40 UTC. The observed empty PostToolUse hooks
+were at 10:42:04, 10:42:06, and 10:42:25, all before their next eligible poll.
+At 10:42:25.837 usage jumped from 86,287 to 111,577 and triggered shutdown.
+`UnknownProcessId` appeared at 10:42:25.846 while A had an active sleep, followed
+by both process exits at 10:42:25.860. This timing is consistent with a cancellation
+race, not the cause of the missing delivery; its internal cause is not proven.
+The revised runner records shutdown initiation and waits for completed turns on
+success, while keeping immediate process-group termination at budget limits.
 
 ## Reports and recovery
 
@@ -150,8 +214,9 @@ Earlier live trials proved native startup and independent registration but did
 not prove complete delivery: the first encountered hook trust configuration;
 the corrected trial encountered missing MCP credential forwarding. Both are now
 addressed in simulator configuration. Prior chats were retired and environments
-removed. These runs remain INCONCLUSIVE; new local verification does not change
-their results. No new live trial is authorized yet.
+removed. The latest 100,000-token trial also proved A's real MCP request but stopped before
+the next eligible tool poll. These runs remain INCONCLUSIVE; local verification
+does not change their results. No staged live trial is authorized yet.
 
 This runner uses process-based macOS isolation and the same GitHub account for
 both chats. It has no baseline comparison, booking scenario, automatic merging,

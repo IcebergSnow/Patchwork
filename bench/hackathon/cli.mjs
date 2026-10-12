@@ -26,6 +26,8 @@ delete requires completed cleanup and removes only this run's local reports.
 check-local uses read-only Codex account discovery, with no model turns or GitHub access. It cannot pass Phase 0.
 Only ChatGPT authentication with the standard OpenAI provider is allowed.
 No automatic repository deletion. No live runs in ordinary tests or CI.
+preflight runs a UserPromptSubmit round trip, then a separate PostToolUse round trip.
+Both paths and cleanup must pass. Idle waits do not repeatedly call models.
 Phase 1 requires separate approval even after a passing preflight.
 `;
 try {

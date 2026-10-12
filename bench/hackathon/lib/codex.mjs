@@ -22,6 +22,7 @@ export class Codex {
       this.logWrites = this.logWrites.then(() => appendFile(log, redact(event) + "\n", { mode: 0o600 }));
       onEvent(event);
     };
+    this.record = record;
     this.child.stderr.on("data", (b) => record("process/stderr", { text: redact(b.toString()).slice(0, 4000) }));
     createInterface({ input: this.child.stdout }).on("line", (line) => {
       let message;
@@ -73,7 +74,8 @@ export class Codex {
   stop() {
     // A parent can exit before its MCP/shell children. Keep the grace period
     // tied to our process group, not just the parent's close event.
-    return this.stopping ||= (async () => {
+    return this.stopping ||= Promise.resolve().then(async () => {
+      this.record("runner/stop", {});
       const signal = (value) => {
         if (!this.child.pid) return false;
         try { process.kill(-this.child.pid, value); return true; }
@@ -86,43 +88,11 @@ export class Codex {
       }
       await this.closed;
       await this.logWrites;
-    })();
+    });
   }
 }
 
 export function toolResult(event) {
   try { return JSON.parse(event?.params?.item?.result?.content?.find(c => c.type === "text")?.text); }
   catch { return null; }
-}
-export function evidence(events, marker, sourcePaths) {
-  const by = (agent) => events.filter((e) => e.agent === agent);
-  const native = (agent, name) => by(agent).filter((e) => e.method === "hook/completed" && e.params?.run?.eventName === name &&
-    e.params.run.status === "completed" && e.params.run.sourcePath === sourcePaths[agent]);
-  const calls = (agent, tool) => by(agent).filter(e => e.method === "item/completed" && e.params?.item?.type === "mcpToolCall" &&
-    e.params.item.server === "patchwork" && e.params.item.tool === tool && e.params.item.status === "completed" &&
-    !e.params.item.error && !e.params.item.result?.isError);
-  const request = calls("sender", "post_message").find(e => e.params.item.arguments?.kind === "request" && e.params.item.arguments.body === marker);
-  const number = toolResult(request)?.number;
-  const contexts = agent => ["sessionStart", "userPromptSubmit", "postToolUse"].flatMap(name => native(agent, name)).filter(e =>
-    e.params.run.handlerType === (e.params.run.eventName === "sessionStart" ? "command" : "mcpTool"));
-  const delivery = contexts("receiver").find(e => e.params.run.entries.some(v => v.kind === "context" && v.text.includes(marker) &&
-    (v.text.includes(`issue:${number}`) || v.text.split("\n").some(line => { try { const r = JSON.parse(line); return r.number === number && r.body?.includes(marker); } catch { return false; } }))));
-  const ack = calls("receiver", "acknowledge_request").find(e => Number.isSafeInteger(number) && e.params.item.arguments?.request_id === number && e.params.item.arguments.response === "can_handle");
-  const ackId = toolResult(ack)?.id;
-  const returned = contexts("sender").find(e => Number.isSafeInteger(ackId) && e.params.run.entries.some(v => v.kind === "context" && v.text.includes(`comment:${ackId}`) && v.text.includes("Can handle")));
-  const after = (a,b) => !!a && !!b && Date.parse(a.timestamp) >= Date.parse(b.timestamp);
-  const began = call => call?.params.item.id ? by(call.agent).find(e => e.method === "item/started" && e.params?.item?.id === call.params.item.id) || call : call;
-  return {
-    startupReceiver: native("receiver", "sessionStart").some((e) => e.params.run.handlerType === "command" && e.params.run.entries.some((v) => v.kind === "context" && v.text.includes("Your agent ID:"))),
-    startupSender: native("sender", "sessionStart").some((e) => e.params.run.handlerType === "command" && e.params.run.entries.some((v) => v.kind === "context" && v.text.includes("Your agent ID:"))),
-    senderMcpRequest: !!request && Number.isSafeInteger(number),
-    nativeRequestDelivery: after(delivery, began(request)),
-    receiverMcpAcknowledgment: after(began(ack), delivery),
-    nativeAcknowledgmentDelivery: after(returned, began(ack)),
-    noManualBoardReads: !events.some((e) => e.params?.item?.type === "mcpToolCall" && ["check_board", "read_messages"].includes(e.params.item.tool)),
-    onlyCheckpointShellCommands: !events.some(e => e.params?.item?.type === "commandExecution" &&
-      !/^sleep\s+20$/.test((e.params.item.command || "").trim().replace(/^\/bin\/(?:zsh|bash) -l?c ['"]([^'"]+)['"]$/, "$1"))),
-    modelUnchanged: !events.some((e) => e.method === "model/rerouted"),
-    subscriptionUnchanged: !events.some(e => e.method === "account/updated" && !e.params.subscriptionVerified),
-  };
 }

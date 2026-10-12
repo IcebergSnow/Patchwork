@@ -1,9 +1,9 @@
 import { lstat, readdir, rm } from "node:fs/promises";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
 import { authorize, command, delay, json, newRun, ownedDirectory, redact, repoName, root, save } from "./common.mjs";
 import { prepareRuntime, prepareAgent, configureMcpEnvironment, loadCredentials, chatState } from "./environment.mjs";
-import { Codex, evidence, toolResult } from "./codex.mjs";
+import { Codex } from "./codex.mjs";
+import { stagedTurns, evidence, usage } from "./stages.mjs";
 import { agentAuthentication, codexAuthentication, AUTH_CONFIG } from "./auth.mjs";
 import { report } from "./report.mjs";
 import { metadata } from "../../../packages/cli/lib/board.js";
@@ -213,7 +213,7 @@ export async function preflight(options) {
     }
     const deadline = Date.now() + m.runtimeSeconds * 1000;
     m.startedAt = new Date().toISOString();
-    deadlineTimer = setTimeout(() => { for (const c of clients) void c.stop(); }, m.runtimeSeconds * 1000);
+    deadlineTimer = setTimeout(() => { resourceStop = "Authorized live runtime budget reached."; for (const c of clients) void c.stop(); }, m.runtimeSeconds * 1000);
     m.hookInventory = [];
     for (const a of agents) {
       await agentAuthentication(a, creds.codex);
@@ -265,49 +265,37 @@ export async function preflight(options) {
     if (options["setup-only"]) {
       m.setupOnly = true;
       await until(() => agents.every((a) => a.client.events.some((e) => e.method === "hook/completed" && e.params.run.eventName === "sessionStart")), Math.min(deadline, Date.now() + 65_000), "No native SessionStart observed during setup-only probe. No model prompt was sent.");
-      m.evidence = evidence(events(), "__NOT_SENT__", paths);
+      m.evidence = evidence(events(), {}, paths).checks;
       m.blocker = "Setup-only probe: no model prompts were submitted. Full two-agent message delivery is not yet verified.";
       return run;
     }
-    const marker = `${m.runId} REQUEST-${randomUUID()}`;
-    m.challenge = marker;
-    const receiver = agents[0], sender = agents[1];
-    const base = `This is an authorized, isolated Patchwork native-hook feasibility test in ${m.repo}. Only interact with test content containing ${m.runId}. Never read credentials, other agents' state, or unrelated board content. Do not alter repository files or resolve requests. Use only your private chat_key supplied by the native startup hook. Do not call check_board or read_messages yourself, invoke hook commands, or fetch board content using shell/GitHub; automatic native hooks are under test. Use only 'sleep 20' shell commands to reach ordinary checkpoints; repeat up to twelve times as needed. `;
-    for (const a of agents) await codexAuthentication(a.client, a); // final gate before any model usage
-    await run.persist(); // includes challenge for interrupted-write recovery
-    await receiver.client.call("turn/start", { threadId: receiver.threadId, model: m.model, effort: m.reasoning, input: [{ type: "text", text: base + `You are Agent B. Wait for this run's request to arrive automatically. Use its issue number from the delivered context to call acknowledge_request exactly once with response can_handle. Then finish. If no request arrives, report failure. Do not invent a request or post another message.` }] });
-    if (interrupted || resourceStop) throw new Error(resourceStop || "Preflight interrupted.");
-    await sender.client.call("turn/start", { threadId: sender.threadId, model: m.model, effort: m.reasoning, input: [{ type: "text", text: base + `You are Agent A. Call post_message once with kind request, title '${m.runId} native request test', and body exactly '${marker}'. Then wait at ordinary shell checkpoints until Agent B's Can handle acknowledgment for that request arrives automatically. Report receipt and finish only after it arrives. Do not acknowledge your own request.` }] });
-    console.log("Two real Codex turns started; waiting for native request and acknowledgment delivery.");
-    await until(() => {
-      m.evidence = evidence(events(), marker, paths);
+    const check = () => {
       if (resourceStop || interrupted) throw new Error(resourceStop || "Preflight interrupted.");
-      if (sender.client.events.some((e) => e.method === "turn/completed") && !m.evidence.nativeAcknowledgmentDelivery)
-        throw Object.assign(new Error("Agent A finished before native acknowledgment delivery was proven. " +
-          sender.client.events.filter((e) => e.method === "hook/completed" && e.params.run.status === "failed")
-            .flatMap((e) => e.params.run.entries.filter((v) => v.kind === "error").map((v) => v.text)).slice(-2).join(" ")), { trialFailure: true });
-      if (clients.some((c) => c.exit)) throw new Error("A Codex process exited before hook delivery was proven.");
-      return Object.values(m.evidence).every(Boolean);
-    }, deadline, "Native request/acknowledgment delivery was not proven within the authorized runtime budget.");
+      if (clients.some(c => c.exit)) throw new Error("A Codex process exited before the staged trial completed.");
+    };
+    await stagedTurns(run, agents, deadline, check);
     await collect(run, agents);
     const chats = await Promise.all(agents.map(chatState));
     m.evidence.independentIdentities = chats.every((c) => c.length === 1 && c[0].registered) && chats[0][0].id !== chats[1][0].id && chats[0][0].chat_key !== chats[1][0].chat_key;
-    m.evidence.independentSessions = receiver.threadId !== sender.threadId;
+    m.evidence.independentSessions = new Set(agents.map(a => a.threadId)).size === 2;
     m.evidence.independentCursors = agents[0].connection !== agents[1].connection && chats.every((c) => c[0]?.initialized && Object.keys(c[0].seen).length > 0);
     const comments = await list(m.repo, `issues/${m.board}/comments`);
-    const posted = sender.client.events.find(e => e.method === "item/completed" && e.params?.item?.tool === "post_message" && e.params.item.arguments?.kind === "request" && toolResult(e)?.number);
-    const number = toolResult(posted)?.number;
-    const request = await github(m.repo, `issues/${number}`);
-    const replies = await list(m.repo, `issues/${number}/comments`);
-    const ack = replies.find(c => metadata(c.body)?.type === "ack" && metadata(c.body)?.agent_id === chats[0][0].id && metadata(c.body)?.response === "can_handle");
-    m.evidence.receiverCursorContainsRequest = !!chats[0]?.[0]?.seen[`issue:${number}`];
-    m.evidence.senderCursorContainsAcknowledgment = !!ack && !!chats[1]?.[0]?.seen[`comment:${ack.id}`];
-    m.evidence.remoteRegistrations = chats.every((cs) => cs.every((chat) => comments.some((c) => metadata(c.body)?.agent_id === chat.id && metadata(c.body)?.type === "agent")));
-    m.evidence.remoteRequestAndAcknowledgment = ownedRequest(request, m, new Set([chats[1][0].id])) && !!ack && ack.user.id === m.repository.userId;
+    m.evidence.remoteRegistrations = chats.every(cs => cs.every(chat => comments.some(c => metadata(c.body)?.agent_id === chat.id && metadata(c.body)?.type === "agent")));
+    for (const [name, proof] of Object.entries(m.delivery)) {
+      const number = proof.requestNumber;
+      const request = await github(m.repo, `issues/${number}`);
+      const replies = await list(m.repo, `issues/${number}/comments`);
+      const ack = replies.find(c => c.id === proof.acknowledgmentId && metadata(c.body)?.type === "ack" &&
+        metadata(c.body)?.agent_id === chats[0][0].id && metadata(c.body)?.response === "can_handle");
+      m.evidence[`${name}ReceiverCursor`] = !!chats[0]?.[0]?.seen[`issue:${number}`];
+      m.evidence[`${name}SenderCursor`] = !!ack && !!chats[1]?.[0]?.seen[`comment:${ack.id}`];
+      m.evidence[`${name}RemoteRecords`] = request.id === proof.messageId && ownedRequest(request, m, new Set([chats[1][0].id])) &&
+        request.body.includes(m.phases[name].marker) && !!ack && ack.user.id === m.repository.userId;
+    }
     m.status = Object.values(m.evidence).every(Boolean) ? "PASS" : "FAIL";
   } catch (e) {
     m.status = e.trialFailure ? "FAIL" : "INCONCLUSIVE";
-    m.blocker = redact(e.message + " " + clients.flatMap((c) => c.events.filter((v) => v.method === "process/stderr").slice(-4).map((v) => v.params.text)).join("").slice(-2500));
+    m.blocker = redact((resourceStop || e.message) + " " + clients.flatMap((c) => c.events.filter((v) => v.method === "process/stderr").slice(-4).map((v) => v.params.text)).join("").slice(-2500));
     console.error(m.blocker);
   } finally {
     clearTimeout(deadlineTimer);
@@ -316,6 +304,33 @@ export async function preflight(options) {
     for (const a of m.agents) {
       const client = agents.find((v) => v.id === a.id)?.client;
       a.status = client?.events.filter((e) => e.method === "turn/completed").at(-1)?.params?.turn?.status || "stopped";
+    }
+    if (m.phases) {
+      const events = clients.flatMap(c => c.events);
+      const proof = evidence(events, m.phases, Object.fromEntries(agents.map(a => [a.id, a.hooks])));
+      Object.assign(m.evidence, proof.checks);
+      if (m.status === "PASS" && !Object.values(m.evidence).every(Boolean)) {
+        m.status = "FAIL";
+        m.blocker = "Final native evidence or safety checks failed; see the per-path report.";
+      }
+      m.delivery = proof.delivery;
+      m.usage = usage(events);
+      m.shutdownDiagnostics = events.filter(e => e.method === "process/stderr").map(e => ({
+        agent: e.agent, at: e.timestamp, text: e.params.text,
+        afterStop: events.some(s => s.agent === e.agent && s.method === "runner/stop" && s.timestamp <= e.timestamp),
+      }));
+      for (const stage of m.stages) {
+        if (stage.status === "started") {
+          const ended = events.find(e => e.agent === stage.agent && e.method === "turn/completed" && e.params.turn.id === stage.turnId);
+          stage.status = ended?.params.turn.status || "stopped";
+          stage.finishedAt = ended?.timestamp || events.find(e => e.agent === stage.agent && e.method === "process/exit")?.timestamp || new Date().toISOString();
+        }
+        const samples = m.usage.increments.filter(e => e.agent === stage.agent && e.turnId === stage.turnId);
+        stage.usage = samples.length && samples.every(e => e.delta) ? samples.reduce((sum, e) => {
+          for (const [key, v] of Object.entries(e.delta)) sum[key] = (sum[key] || 0) + v;
+          return sum;
+        }, {}) : null;
+      }
     }
     m.finishedAt = new Date().toISOString();
     await run.persist();

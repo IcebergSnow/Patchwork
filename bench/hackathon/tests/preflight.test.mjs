@@ -4,7 +4,7 @@ import { mkdtemp, realpath, rm, symlink, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { authorize, repoName, runId, redact, secret, save, ownedDirectory, command, newRun, json, delay } from "../lib/common.mjs";
-import { Codex, evidence } from "../lib/codex.mjs";
+import { Codex } from "../lib/codex.mjs";
 import { parse } from "smol-toml";
 import { seatbelt, mcpEnvironment } from "../lib/environment.mjs";
 import { mergeCodex } from "../../../packages/cli/lib/config.js";
@@ -39,43 +39,6 @@ test("credentials and private chat keys are removed from persisted events", () =
   assert(!s.includes("ghp_123456789"));
   assert(!s.includes("12345678-abcd-1234-abcd-123456789012"));
   assert.doesNotThrow(() => JSON.parse(s));
-});
-const paths = { receiver: "/a/.codex/hooks.json", sender: "/b/.codex/hooks.json" };
-const marker = "run REQUEST-unique";
-function fixture() {
-  const hook = (agent, eventName, handlerType, text, time) => ({ agent, timestamp: new Date(time).toISOString(), method: "hook/completed", params: { run: { eventName, handlerType, status: "completed", sourcePath: paths[agent], entries: [{ kind: "context", text }] } } });
-  const call = (agent, tool, args, result, time) => ({ agent, timestamp: new Date(time).toISOString(), method: "item/completed", params: { item: { type: "mcpToolCall", server: "patchwork", tool, status: "completed", arguments: args, result: { content: [{type:"text", text:JSON.stringify(result)}] } } } });
-  return [hook("receiver", "sessionStart", "command", "Your agent ID: B", 1), hook("sender", "sessionStart", "command", "Your agent ID: A", 2),
-    call("sender", "post_message", {kind:"request",body:marker}, {number:42,id:100}, 3),
-    hook("receiver", "postToolUse", "mcpTool", `issue:42 ${marker}`, 4),
-    call("receiver", "acknowledge_request", {request_id:42,response:"can_handle"}, {id:901}, 5),
-    hook("sender", "postToolUse", "mcpTool", "comment:901 B: **Can handle**.", 6)];
-}
-test("proof requires both native startups, request, MCP acknowledgment, and return delivery", () => {
-  assert(Object.values(evidence(fixture(), marker, paths)).every(Boolean));
-  for (let i = 0; i < 6; i++) assert(Object.values(evidence(fixture().filter((_, j) => j !== i), marker, paths)).some((v) => !v));
-});
-test("manually read context, wrong hook source, and replies before delivery do not prove hooks", () => {
-  const manual = fixture();
-  manual.push({ params: { item: { type: "mcpToolCall", tool: "read_messages" } } });
-  assert.equal(evidence(manual, marker, paths).noManualBoardReads, false);
-  const wrong = fixture(); wrong[3].params.run.sourcePath = "/fake/hooks.json";
-  assert.equal(evidence(wrong, marker, paths).nativeRequestDelivery, false);
-  const early = fixture(); early[4].timestamp = new Date(0).toISOString();
-  assert.equal(evidence(early, marker, paths).receiverMcpAcknowledgment, false);
-});
-test("failed MCP results and automatic model substitutions cannot pass", () => {
-  const failed = fixture(); failed[2].params.item.result = { isError: true };
-  assert.equal(evidence(failed, marker, paths).senderMcpRequest, false);
-  const rerouted = fixture(); rerouted.push({ method: "model/rerouted" });
-  assert.equal(evidence(rerouted, marker, paths).modelUnchanged, false);
-});
-test("wrong request, unrelated acknowledgment, and an auth-mode change cannot pass", () => {
-  const wrong = fixture(); wrong[4].params.item.arguments.request_id = 43;
-  assert.equal(evidence(wrong, marker, paths).receiverMcpAcknowledgment, false);
-  const other = fixture(); other[5].params.run.entries[0].text = "comment:902 Can handle";
-  assert.equal(evidence(other, marker, paths).nativeAcknowledgmentDelivery, false);
-  assert.equal(evidence([...fixture(), {method:"account/updated",params:{subscriptionVerified:false}}],marker,paths).subscriptionUnchanged,false);
 });
 test("request recovery requires run tags, verified owner/chat, and a newly created issue", () => {
   const m = {runId:"sim-unit",initialIssueIds:[5],repository:{userId:10}};
@@ -146,17 +109,6 @@ test("CLI rejects live runs without authorization before accessing tools", async
   await assert.rejects(command(process.execPath, [path.resolve(import.meta.dirname, "../cli.mjs"), "preflight", "--repo", "example/sandbox"]), /allow-live/);
   await assert.rejects(preflight({repo:"example/sandbox"}),/allow-live/);
 });
-test("startup/prompt delivery counts when genuine; shell-based board reads do not", () => {
-  const early=fixture();
-  early[3].params.run.eventName="userPromptSubmit";
-  assert.equal(evidence(early,marker,paths).nativeRequestDelivery,true);
-  early[3].params.run.eventName="sessionStart";early[3].params.run.handlerType="command";
-  early[3].params.run.entries[0].text=JSON.stringify({number:42,body:marker});
-  assert.equal(evidence(early,marker,paths).nativeRequestDelivery,true);
-  const command=c=>({params:{item:{type:"commandExecution",command:c}}});
-  assert.equal(evidence([...fixture(),command("/bin/zsh -lc 'sleep 20'")],marker,paths).onlyCheckpointShellCommands,true);
-  assert.equal(evidence([...fixture(),command("gh api repos/example/sandbox/issues")],marker,paths).onlyCheckpointShellCommands,false);
-});
 test("invalid budgets and source repository are rejected before mutation", async (t) => {
   const dir = await realpath(await mkdtemp(path.join(os.tmpdir(), "sim-budget-")));
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -223,6 +175,9 @@ test("stopping a session also kills an uncooperative child after its parent exit
   const stopping = c.stop();
   assert.equal(c.stop(), stopping);
   await stopping;
+  const events = (await readFile(path.join(dir, "events.jsonl"), "utf8")).trim().split("\n").map(JSON.parse);
+  assert.equal(events.filter(e => e.method === "runner/stop").length, 1);
+  assert(events.findIndex(e => e.method === "runner/stop") < events.findIndex(e => e.method === "process/exit"));
   await delay(50);
   const last = await readFile(heartbeat, "utf8");
   await delay(100);
