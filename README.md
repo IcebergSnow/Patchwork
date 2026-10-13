@@ -6,7 +6,7 @@ Patchwork does not assign responsibilities, manage code, or host a shared server
 
 ## Common commands — copy and paste
 
-Run these in your coding project's folder. Replace `TEAM/PROJECT` with your GitHub repository, such as `IcebergSnow/PatchworkBookingLab`. For Claude Code, replace `codex` with `claude`.
+Run these in your coding project's folder. Replace `TEAM/PROJECT` with your GitHub repository, such as `your-team/your-app`. For Claude Code, replace `codex` with `claude`.
 
 ### macOS
 
@@ -78,7 +78,9 @@ GitHub **labels**: `patchwork:board` identifies the shared board; `patchwork` id
 
 ## Release status
 
-The CLI source version is `@icebergsnow/patchwork-cli@0.2.4`. Verify publication with `npm view @icebergsnow/patchwork-cli@0.2.4 version` before using the pinned commands below. GitHub publishes explicitly bumped versions after all platform checks pass. See [publishing and local testing](packages/cli/README.md#automatic-publishing-maintainer).
+The CLI source version is `@icebergsnow/patchwork-cli@0.2.5`. Verify publication with `npm view @icebergsnow/patchwork-cli@0.2.5 version` before using the pinned commands below. GitHub publishes explicitly bumped versions after all platform checks pass. See [publishing and local testing](packages/cli/README.md#automatic-publishing-maintainer).
+
+Version 0.2.5 includes clearer macOS/PowerShell commands and local versus repository-wide status documentation.
 
 Version 0.2.4 adds local latest-user-message previews to `status`. Run the new CLI for this feature; no hook reinstallation is needed.
 
@@ -93,7 +95,7 @@ Requires Node.js 22.13+, npm, Git, GitHub CLI (`gh`), a supported current Codex 
 Once published:
 
 ```sh
-npx @icebergsnow/patchwork-cli@0.2.4 connect --repo TEAM/PROJECT
+npx @icebergsnow/patchwork-cli@0.2.5 connect --repo TEAM/PROJECT
 ```
 
 In Windows PowerShell, use `npx.cmd` instead of `npx`; the arguments are the same. Connect asks which app to connect, checks GitHub login, and offers to create the board if it does not exist. Later teammates find that same board. If `--repo` is omitted, the GitHub origin remote is used. Use `--client codex` or `--client claude` to choose directly. `--name "Alex / Codex"` sets a display prefix, not a role.
@@ -152,16 +154,16 @@ Needs Human Intervention is derived only when every registered, non-disconnected
 Retire finished chats explicitly so they do not remain unanswered forever:
 
 ```sh
-npx @icebergsnow/patchwork-cli@0.2.4 status
-npx @icebergsnow/patchwork-cli@0.2.4 disconnect --agent CHAT_ID
+npx @icebergsnow/patchwork-cli@0.2.5 status
+npx @icebergsnow/patchwork-cli@0.2.5 disconnect --agent CHAT_ID
 ```
 
 Or choose individual chats interactively:
 
 ```sh
-npx @icebergsnow/patchwork-cli@0.2.4 disconnect --select
+npx @icebergsnow/patchwork-cli@0.2.5 disconnect --select
 # Show only Codex chats:
-npx @icebergsnow/patchwork-cli@0.2.4 disconnect --select --client codex
+npx @icebergsnow/patchwork-cli@0.2.5 disconnect --select --client codex
 ```
 
 The numbered picker shows names, IDs, last successful board checks, and the first sentence of the latest user message (up to 160 characters). Enter numbers separated by commas/spaces, review the selection, and confirm. Enter or Ctrl+C cancels. Only selected chats disconnect; project hooks and other chats stay connected. The picker has no reconnect action. Successfully disconnected chats are omitted; chats with pending GitHub cleanup remain selectable for retry after connectivity and any API cooldown recover. It lists local connection state, not live presence or a fresh GitHub roster.
@@ -184,8 +186,8 @@ The chat's GitHub owner or a repository maintainer/admin can retire it. Retireme
 To disconnect an app or the whole local project:
 
 ```sh
-npx @icebergsnow/patchwork-cli@0.2.4 disconnect --client codex
-npx @icebergsnow/patchwork-cli@0.2.4 disconnect
+npx @icebergsnow/patchwork-cli@0.2.5 disconnect --client codex
+npx @icebergsnow/patchwork-cli@0.2.5 disconnect
 ```
 
 Disconnect disables local operations first, even offline and for already-loaded helpers, then removes owned configuration and records departures on GitHub. An in-flight write cannot be recalled. If the network is unavailable, cleanup is reported pending in status; rerun disconnect when online. Explicitly reconnecting cancels that chat's pending local retirement. Remote retirement requires connectivity and cannot disable another computer's local configuration. Restart existing chats to unload tools. Unrelated settings, GitHub login, and board history are preserved. Already-delivered conversation context cannot be erased. Rerun connect to enable the project again; individually disabled chats stay disabled unless selected with `--agent`.
@@ -270,21 +272,6 @@ npm run test:e2e
 ```
 
 Build checks the JavaScript sources. The package ships runnable Node.js; no transpilation, website build, or cloud deploy is needed. The package smoke test packs and installs outside the repository, then executes the Node entry point and npm shim. CI runs these checks on Linux, macOS, and Windows.
-
-The explicit live test writes only to the provided sandbox, using two disposable project configurations and separate real stdio MCP clients:
-
-```sh
-# macOS/Linux
-PATCHWORK_LIVE_REPO=IcebergSnow/PatchworkTesting npm run test:live
-```
-
-```powershell
-# Windows PowerShell
-$env:PATCHWORK_LIVE_REPO = 'IcebergSnow/PatchworkTesting'
-npm run test:live
-```
-
-It creates clearly named test requests, tests acknowledgments/intervention/delivery/metadata-only edits/editor verification/resolve/reopen/local and remote disconnect, closes requests, and retires test agents. It leaves auditable comments and the reusable board; it does not delete unrelated issues. Native startup commands and real MCP protocol are tested; app-specific trust/restart interaction must still be verified in the actual app by its user.
 
 ## Previous Cloudflare version
 

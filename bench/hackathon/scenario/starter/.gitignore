@@ -1,5 +1,0 @@
-.codex/
-node_modules/
-.data/
-*.sqlite*
-*.log

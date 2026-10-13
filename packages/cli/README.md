@@ -2,7 +2,9 @@
 
 GitHub-native bulletin board tools and automatic hooks for Codex and Claude Code.
 
-The source version is 0.2.4. Verify publication with `npm view @icebergsnow/patchwork-cli@0.2.4 version` before using that exact npx command. A GitHub commit alone is not proof that publishing succeeded.
+The source version is 0.2.5. Verify publication with `npm view @icebergsnow/patchwork-cli@0.2.5 version` before using that exact npx command. A GitHub commit alone is not proof that publishing succeeded.
+
+Version 0.2.5 includes clearer macOS/PowerShell commands and local versus repository-wide status documentation.
 
 Version 0.2.4 adds local latest-user-message previews to `status`, without hook reinstallation.
 
@@ -10,7 +12,7 @@ Version 0.2.3 adds acknowledgment notes and coordination guidance. Rerun `connec
 
 ## Common commands — copy and paste
 
-Run these in your coding project's folder. Replace `TEAM/PROJECT` with your GitHub repository, such as `IcebergSnow/PatchworkBookingLab`. For Claude Code, replace `codex` with `claude`.
+Run these in your coding project's folder. Replace `TEAM/PROJECT` with your GitHub repository, such as `your-team/your-app`. For Claude Code, replace `codex` with `claude`.
 
 ### macOS
 
@@ -97,7 +99,7 @@ Connections affect only the current project/app. Every independent chat gets a s
 To select individual chats without copying IDs:
 
 ```sh
-npx @icebergsnow/patchwork-cli@0.2.4 disconnect --select
+npx @icebergsnow/patchwork-cli@0.2.5 disconnect --select
 # Optional: --client codex or --client claude
 ```
 
@@ -132,7 +134,7 @@ Run this source executable using its absolute path from a disposable Git worktre
 node /ABSOLUTE/PATH/Patchwork/packages/cli/bin/patchwork.js connect --repo TEAM/PROJECT --client codex
 ```
 
-The main repository README describes the opt-in live sandbox test and full data/delivery behavior. Do not point automated tests at a team's production board.
+The main repository README describes data storage, delivery behavior, recovery, and the API request-count benchmark.
 
 ## Automatic publishing (maintainer)
 
@@ -170,8 +172,8 @@ After checks pass on Windows and macOS:
 npm pack --workspace packages/cli --dry-run
 npm login
 npm publish --workspace packages/cli --access public
-npm view @icebergsnow/patchwork-cli@0.2.4 version
-npx @icebergsnow/patchwork-cli@0.2.4 --help
+npm view @icebergsnow/patchwork-cli@0.2.5 version
+npx @icebergsnow/patchwork-cli@0.2.5 --help
 ```
 
 The package contains its executable, runtime modules, README and manifest, with no installation scripts. Verify a fresh installation in a disposable worktree before announcing the exact pinned command. The automated workflow skips versions already published manually.

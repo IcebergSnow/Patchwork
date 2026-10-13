@@ -13,9 +13,6 @@
     "test": "node --test tests/*.test.js",
     "build": "node scripts/check.mjs",
     "test:e2e": "node scripts/package-smoke.mjs",
-    "test:live": "node scripts/github-smoke.mjs",
-    "measure:api": "node scripts/measure-api.mjs",
-    "sim": "node bench/hackathon/cli.mjs",
-    "test:sim": "node --test bench/hackathon/tests/*.test.mjs"
+    "measure:api": "node scripts/measure-api.mjs"
   }
 }
