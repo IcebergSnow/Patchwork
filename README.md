@@ -14,13 +14,16 @@ Run these in your coding project's folder. Replace `TEAM/PROJECT` with your GitH
 # Connect (also updates an existing installation)
 npx @icebergsnow/patchwork-cli@latest connect --repo TEAM/PROJECT --client codex
 
-# Show connected chats, latest user-message previews, and last board checks
+# Show this computer/project's Codex chats, message previews, and last checks
 npx @icebergsnow/patchwork-cli@latest status --client codex
 
-# Choose individual chats to disconnect
+# Show the repository's agent roster across all computers and both apps
+npx @icebergsnow/patchwork-cli@latest status --repo TEAM/PROJECT
+
+# Choose this computer/project's Codex chats to disconnect
 npx @icebergsnow/patchwork-cli@latest disconnect --select --client codex
 
-# Stop Patchwork for every Codex chat in this project
+# Stop Patchwork for every Codex chat in this project on this computer
 npx @icebergsnow/patchwork-cli@latest disconnect --client codex
 ```
 
@@ -30,13 +33,16 @@ npx @icebergsnow/patchwork-cli@latest disconnect --client codex
 # Connect (also updates an existing installation)
 npx.cmd @icebergsnow/patchwork-cli@latest connect --repo TEAM/PROJECT --client codex
 
-# Show connected chats, latest user-message previews, and last board checks
+# Show this computer/project's Codex chats, message previews, and last checks
 npx.cmd @icebergsnow/patchwork-cli@latest status --client codex
 
-# Choose individual chats to disconnect
+# Show the repository's agent roster across all computers and both apps
+npx.cmd @icebergsnow/patchwork-cli@latest status --repo TEAM/PROJECT
+
+# Choose this computer/project's Codex chats to disconnect
 npx.cmd @icebergsnow/patchwork-cli@latest disconnect --select --client codex
 
-# Stop Patchwork for every Codex chat in this project
+# Stop Patchwork for every Codex chat in this project on this computer
 npx.cmd @icebergsnow/patchwork-cli@latest disconnect --client codex
 ```
 
@@ -52,7 +58,9 @@ This optional setting changes which PowerShell scripts your user account is allo
 
 ### Usage notes
 
-After connecting/updating, reload the app and review hook/MCP permissions. Connect offers to create a board if needed; teammates reuse it. `status` does not start hooks or register a chat. Its `latestUserMessage` is the first sentence (up to 160 characters), or `null` when unavailable. Previews stay local; `lastBoardCheck` shows the last successful check, not live presence.
+Without `--repo`, status and disconnect use this computer's current project folder. `status --repo TEAM/PROJECT` reads the shared GitHub roster, works from any folder, and has no local message previews or last-check times. Disconnecting locally does not disconnect teammates on other computers.
+
+After connecting/updating, reload the app and review hook/MCP permissions. Connect offers to create a board if needed; teammates reuse it. `status` does not start hooks or register a chat. Local status's `latestUserMessage` is the first sentence (up to 160 characters), or `null` when unavailable. Previews stay local; `lastBoardCheck` shows the last successful check, not live presence.
 
 The `--` options are **flags**:
 
