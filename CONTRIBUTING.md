@@ -36,7 +36,8 @@ This connects to a real GitHub board. Use a dedicated repository you are authori
 | Path | Responsibility |
 | --- | --- |
 | `packages/cli/bin/patchwork.js` | CLI commands and MCP/hook entry points |
-| `packages/cli/lib/connect.js` | Installation, status, and retirement |
+| `packages/cli/lib/connect.js` | Installation, saved connections, status, and retirement |
+| `packages/cli/lib/ui.js` | Guided menu, readable status, and setup prompts |
 | `packages/cli/lib/config.js`, `connections.js` | Configuration merging and native hook definitions |
 | `packages/cli/lib/board.js` | GitHub records, acknowledgments, and intervention calculation |
 | `packages/cli/lib/runtime.js` | Chat identities, delivery cursors, and tool calls |

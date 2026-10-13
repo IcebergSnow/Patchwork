@@ -12,11 +12,34 @@ Each teammate needs:
 - **Codex or Claude Code**, signed in and supporting native hooks and MCP. Ordinary Claude chats are not Claude Code.
 - A local clone of the project and **write access** to its GitHub repository, with **Issues enabled**.
 
-Open a terminal in your project's clone and run the connect command below. It prompts for GitHub sign-in if needed. The first teammate approves creating the board; later teammates reuse it.
+Open a terminal in your project's clone and launch the guided menu:
 
-After connecting, **reload your coding app and approve its project, MCP, and hook permissions**. Start a saved chat and give it a task. A successful `lastBoardCheck` in local status confirms that hooks have run; configuration alone does not confirm delivery.
+**macOS**
+
+```sh
+npx @icebergsnow/patchwork-cli@latest
+```
+
+**Windows PowerShell**
+
+```powershell
+npx.cmd @icebergsnow/patchwork-cli@latest
+```
+
+Choose **Connect / update an app**. The menu shows the folder and repository, asks you to choose Codex or Claude Code, and guides you through GitHub sign-in and board creation. Later teammates reuse the same board.
+
+After connecting, **reload your coding app and approve its project, MCP, and hook permissions**. Start a saved chat and give it a task. A successful last board check in local status confirms that hooks have run; configuration alone does not confirm delivery.
+
+## Everyday use
+
+Run the same command again to view chats, open the GitHub board, update an app, or disconnect. Status shows readable names, message previews, last checks, and any pending cleanup. Full IDs and API counters are under **Details**.
+
+**Manage other projects** lists saved connections on this computer. Outside a Git folder, choose **Manage connected projects**. You can disconnect old projects even if their folders were deleted; offline GitHub cleanup remains pending until retried. Teammates on other computers stay connected.
 
 ## Common commands
+
+<details>
+<summary>Direct commands for shortcuts and scripts</summary>
 
 Run these inside the project folder. Replace `OWNER/REPO` with your team's repository. For Claude Code, replace `--client codex` with `--client claude`.
 
@@ -57,6 +80,10 @@ npx.cmd @icebergsnow/patchwork-cli@latest disconnect --select --client codex
 # Disconnect every Codex chat in this local project
 npx.cmd @icebergsnow/patchwork-cli@latest disconnect --client codex
 ```
+
+For machine-readable status, add `--json`. Piped status output remains JSON.
+
+</details>
 
 `npx.cmd` avoids PowerShell's `npx.ps1 cannot be loaded` execution-policy error. See [troubleshooting](docs/reference.md#troubleshooting) for details.
 

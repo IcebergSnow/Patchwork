@@ -1,7 +1,7 @@
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
-import { realpath, unlink } from "node:fs/promises";
+import { realpath, unlink, readdir } from "node:fs/promises";
 import { run, GitHub, repository } from "./github.js";
 import {
   createBoard,
@@ -19,6 +19,7 @@ import {
   locked,
   directory,
   digest,
+  home,
 } from "./store.js";
 import { mergeCodex, mergeClaude, mergeHooks, parseConfig } from "./config.js";
 import { hookConfiguration, serverConfiguration } from "./connections.js";
@@ -276,7 +277,38 @@ async function remoteBoard(repo, github, fn) {
     return fn({ gh, sync, c, user });
   });
 }
-export async function status({ cwd, client, repo, github, env } = {}) {
+// Saved selections contain no session keys. Recheck their identity after user
+// input and under the mutation lock, so switching boards cannot redirect cleanup.
+const selectionFields = ["root", "client", "repo", "repoId", "ownerId", "board"];
+async function selectedConnection(saved) {
+  const file = connectionFile(saved.root, saved.client);
+  const current = await readJSON(file);
+  if (!current || selectionFields.some(key => current[key] !== saved[key]))
+    throw new Error("The project connection changed. Select it again before continuing.");
+  return current;
+}
+export async function savedConnections() {
+  const connections = [], warnings = [];
+  let names;
+  try { names = await readdir(path.join(home(), "connections")); }
+  catch (e) { if (e.code === "ENOENT") return { connections, warnings }; throw e; }
+  for (const name of names.sort()) {
+    if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
+    try {
+      const file = path.join(home(), "connections", name), c = await readJSON(file);
+      if (!c || !["codex", "claude"].includes(c.client) || typeof c.root !== "string" ||
+          !path.isAbsolute(c.root) || connectionFile(c.root, c.client) !== file ||
+          repository(c.repo) !== c.repo || ![c.repoId, c.ownerId, c.board].every(n => Number.isSafeInteger(n) && n > 0))
+        throw new Error("Invalid saved connection");
+      connections.push({ ...Object.fromEntries(selectionFields.map(key => [key, c[key]])),
+        enabled: c.enabled && !(await read(disabledFile(file))),
+        folderAvailable: await realpath(c.root).then(root => root === c.root, () => false),
+      });
+    } catch { warnings.push(`Could not read saved connection ${name}. It was skipped.`); }
+  }
+  return { connections, warnings };
+}
+export async function status({ cwd, client, repo, github, env, saved } = {}) {
   if (repo)
     return remoteBoard(repo, github, async ({ sync }) => {
       const state = await sync.view();
@@ -287,11 +319,11 @@ export async function status({ cwd, client, repo, github, env } = {}) {
         warnings: state.warnings,
       };
     });
-  const root = await projectRoot(cwd),
+  const root = saved ? saved.root : await projectRoot(cwd),
     results = [];
-  for (const app of client ? [client] : ["codex", "claude"]) {
+  for (const app of saved ? [saved.client] : client ? [client] : ["codex", "claude"]) {
     const file = connectionFile(root, app),
-      c = await readJSON(file);
+      c = saved ? await selectedConnection(saved) : await readJSON(file);
     if (!c) continue;
     const sessions = await readJSON(stateFile(file));
     const chats = Object.entries(sessions?.chats || {});
@@ -349,11 +381,12 @@ export async function disconnect({
   repo,
   github,
   log = console.log,
+  saved,
 } = {}) {
   if (repo) {
     if (!agent)
       throw new Error(
-        "Remote retirement requires --agent CHAT_ID. List IDs with status --repo OWNER/REPO.",
+        "Remote retirement requires --agent CHAT_ID. List IDs with status --repo OWNER/REPO --json.",
       );
     return remoteBoard(repo, github, async ({ gh, sync, c, user }) => {
       const state = await sync.view(),
@@ -411,11 +444,11 @@ export async function disconnect({
       );
     });
   }
-  const root = await projectRoot(cwd);
+  const root = saved ? saved.root : await projectRoot(cwd);
   let found = false;
-  for (const app of client ? [client] : ["codex", "claude"]) {
+  for (const app of saved ? [saved.client] : client ? [client] : ["codex", "claude"]) {
     const file = connectionFile(root, app);
-    let c = await readJSON(file);
+    let c = saved ? await selectedConnection(saved) : await readJSON(file);
     if (!c) continue;
     const original = await readJSON(stateFile(file));
     if (
@@ -424,14 +457,21 @@ export async function disconnect({
     )
       continue;
     found = true;
-    await write(disabledFile(file, agent), "disconnected\n");
+    if (!saved) await write(disabledFile(file, agent), "disconnected\n");
     await locked(file, async () => {
-      c = await readJSON(file);
+      c = saved ? await selectedConnection(saved) : await readJSON(file);
       await write(disabledFile(file, agent), "disconnected\n");
       if (!agent) {
         c.enabled = false;
         await writeJSON(file, c);
         try {
+          // Missing checkouts are still retireable. Never recreate their files
+          // or follow a replacement symlink while removing owned configuration.
+          const actual = await realpath(root).catch(e => {
+            if (e.code === "ENOENT") return null;
+            throw e;
+          });
+          if (actual && actual !== root) throw new Error("Project folder changed");
           const before = {
             config: await read(c.files.config),
             hooks: await read(c.files.hooks),
@@ -447,8 +487,8 @@ export async function disconnect({
             c.ownedHooks,
             true,
           );
-          if (next !== before.config) await write(c.files.config, next);
-          if (hooks !== before.hooks) await write(c.files.hooks, hooks);
+          if (before.config && next !== before.config) await write(c.files.config, next);
+          if (before.hooks && hooks !== before.hooks) await write(c.files.hooks, hooks);
         } catch {
           log(
             "Disabled locally. Modified agent settings were preserved; remove the remaining Patchwork entries manually.",

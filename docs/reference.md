@@ -2,9 +2,21 @@
 
 [User guide](../README.md) · [Contributing](../CONTRIBUTING.md)
 
+## Guided menu
+
+Run `npx @icebergsnow/patchwork-cli@latest` in a terminal (`npx.cmd` in PowerShell). In a Git checkout, the menu opens that project; elsewhere it offers saved-project management. `menu` explicitly opens the same interface. Without a terminal, the bare command prints help.
+
+- **Connect / update an app** confirms the folder, repository, and app before setup. It checks prerequisites and guides GitHub sign-in and board creation.
+- **View chats** shows local connection state and previews. **Shared GitHub roster** reads registrations across computers; **Details** shows full IDs and API counters.
+- **Open GitHub board** opens the selected app's board in your browser.
+- **Disconnect** offers individual chats or every configured app in that local project, with confirmation.
+- **Manage other projects** lists connections saved under `PATCHWORK_HOME` (normally `~/.patchwork/`). Disabled connections remain listed for recovery. Missing/unavailable folders are marked; cleanup uses saved identities without recreating the checkout. If these local records were also deleted, use repository-wide retirement below.
+
+Select a number; Enter, 0, or q goes back. The menu runs only while open and does not poll in the background. Existing direct commands remain available.
+
 ## Commands and recovery
 
-Examples use `npx`; use `npx.cmd` in Windows PowerShell. Local commands run inside the connected project's Git worktree. Repository-wide status and retirement work without that worktree.
+Examples use `npx`; use `npx.cmd` in Windows PowerShell. Direct local commands run inside the connected project's Git worktree; the menu can select saved connections from any folder. Repository-wide status and retirement work without that worktree.
 
 | Option | Behavior |
 | --- | --- |
@@ -14,11 +26,12 @@ Examples use `npx`; use `npx.cmd` in Windows PowerShell. Local commands run insi
 | `--create-board` | Approve creating a missing board without an interactive prompt. |
 | `--select` | Interactively choose local chats to disconnect. Cannot be combined with `--repo` or `--agent`. |
 | `--agent CHAT_ID` | Disconnect one chat, or explicitly resume a known local chat with connect. |
+| `--json` | Print machine-readable status, including IDs and counters. Piped status also remains JSON. |
 | `--help` | Show command usage. |
 
 ### Reading status
 
-Local `status` lists connection settings and all saved chat records, including disconnected ones. A chat's `enabled` field controls whether local operations are allowed; it is not proof the chat is currently running. `lastBoardCheck` is the last successful hook check. `lastError`, `pendingWrite`, and `pendingRetirement` indicate incomplete operations.
+Terminal `status` uses a readable summary; `status --json` and the menu's Details view expose the fields described here. Local status lists connection settings and all saved chat records, including disconnected ones. A chat's `enabled` field controls whether local operations are allowed; it is not proof the chat is currently running. `lastBoardCheck` is the last successful hook check. `lastError`, `pendingWrite`, and `pendingRetirement` indicate incomplete operations.
 
 `latestUserMessage` is the first sentence of the chat's latest saved user message, up to 160 characters. It may be `null` when a supported transcript cannot be found. Missing previews do not establish that a chat was deleted. The disconnect picker includes enabled chats and pending retirements; already-disconnected chats are omitted.
 
@@ -26,7 +39,7 @@ Local `status` lists connection settings and all saved chat records, including d
 
 ### Individual chats
 
-Copy `CHAT_ID` from status:
+Copy `CHAT_ID` from `status --json` or the menu's Details view:
 
 ```sh
 npx @icebergsnow/patchwork-cli@latest disconnect --client codex --agent CHAT_ID
@@ -37,10 +50,10 @@ npx @icebergsnow/patchwork-cli@latest connect --client codex --agent CHAT_ID
 
 Resuming preserves the identity and delivery cursor. Reconnecting the whole project leaves individually disabled chats disabled until explicitly resumed. A new chat gets a new identity.
 
-If local state or the project folder was lost:
+If only the project folder was deleted, use the menu's saved-project cleanup. If local state was also lost, or you need repository-wide retirement:
 
 ```sh
-npx @icebergsnow/patchwork-cli@latest status --repo OWNER/REPO
+npx @icebergsnow/patchwork-cli@latest status --repo OWNER/REPO --json
 npx @icebergsnow/patchwork-cli@latest disconnect --repo OWNER/REPO --agent CHAT_ID
 ```
 

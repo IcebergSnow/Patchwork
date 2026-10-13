@@ -1,17 +1,18 @@
 #!/usr/bin/env node
 import { parseArgs } from "node:util";
-import { createInterface } from "node:readline/promises";
-import { spawn } from "node:child_process";
 import { connect, status, disconnect } from "../lib/connect.js";
 import { Runtime } from "../lib/runtime.js";
 import { serve } from "../lib/mcp.js";
-import { run } from "../lib/github.js";
+import { ask, login, menu, showStatus } from "../lib/ui.js";
 
 const HELP = `Patchwork — a GitHub bulletin board for independent coding agents.
 
+Run patchwork without arguments for the guided menu.
+
 Usage (inside your coding project's Git worktree):
   patchwork connect [--repo OWNER/REPO] [--client codex|claude] [--name NAME] [--create-board] [--agent CHAT_ID]
-  patchwork status [--client codex|claude] [--repo OWNER/REPO]
+  patchwork status [--client codex|claude] [--repo OWNER/REPO] [--json]
+  patchwork menu
   patchwork disconnect [--client codex|claude] [--agent CHAT_ID] [--repo OWNER/REPO]
   patchwork disconnect --select [--client codex|claude]
 
@@ -25,56 +26,6 @@ Use connect --client APP --agent CHAT_ID to explicitly resume a local chat.
 GitHub credentials remain with gh. No Cloudflare account or pairing code.
 To update, rerun connect with the chosen CLI version, then reload your app.
 `;
-async function ask(question) {
-  if (!process.stdin.isTTY)
-    throw new Error(
-      "Interactive input required. Specify --client and --create-board when appropriate.",
-    );
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    return (await rl.question(question + " ")).trim();
-  } finally {
-    rl.close();
-  }
-}
-async function login() {
-  try {
-    await run("gh", ["auth", "status", "--hostname", "github.com"]);
-  } catch {
-    if (!process.stdin.isTTY)
-      throw new Error(
-        "Authenticate first with gh auth login --hostname github.com.",
-      );
-    if (
-      !/^y(es)?$/i.test(
-        await ask("Sign in to GitHub using your browser? [y/N]"),
-      )
-    )
-      throw new Error("GitHub login is required.");
-    await new Promise((resolve, reject) => {
-      const p = spawn(
-        "gh",
-        [
-          "auth",
-          "login",
-          "--hostname",
-          "github.com",
-          "--web",
-          "--git-protocol",
-          "https",
-          "--skip-ssh-key",
-        ],
-        { stdio: "inherit", shell: false },
-      );
-      p.on("error", () => reject(new Error("Install GitHub CLI (gh) first.")));
-      p.on("exit", (code) =>
-        code === 0
-          ? resolve()
-          : reject(new Error("GitHub login did not complete.")),
-      );
-    });
-  }
-}
 let command;
 try {
   const args = parseArgs({
@@ -88,14 +39,19 @@ try {
       agent: { type: "string" },
       connection: { type: "string" },
       select: { type: "boolean" },
+      json: { type: "boolean" },
     },
   });
   command = args.positionals[0];
-  if (args.values.help || !command) {
+  if (args.values.help || (!command && (!process.stdin.isTTY || !process.stdout.isTTY))) {
     console.log(HELP);
+  } else if (!command || command === "menu") {
+    if (args.positionals.length > 1 || Object.keys(args.values).length) throw new Error("Run patchwork menu without flags, or use an explicit command.");
+    await menu();
   } else {
     if (args.positionals.length !== 1) throw new Error("Use patchwork --help.");
     const { client, repo, name, agent, connection } = args.values;
+    if (args.values.json && command !== "status") throw new Error("Use --json only with status.");
     if (args.values.select && (command !== "disconnect" || agent || repo))
       throw new Error("Use --select only with disconnect in the local project, without --agent or --repo.");
     if (client && !["codex", "claude"].includes(client))
@@ -113,9 +69,11 @@ try {
         create: args.values["create-board"],
         confirm: async (q) => /^y(es)?$/i.test(await ask(q + " [y/N]")),
       });
-    } else if (command === "status")
-      console.log(JSON.stringify(await status({ client, repo }), null, 2));
-    else if (command === "disconnect") {
+    } else if (command === "status") {
+      const result = await status({ client, repo });
+      if (args.values.json || !process.stdout.isTTY) console.log(JSON.stringify(result, null, 2));
+      else showStatus(result);
+    } else if (command === "disconnect") {
       if (args.values.select) {
         const { disconnectPicker } = await import("../lib/disconnect-picker.js");
         await disconnectPicker({ client });
@@ -145,7 +103,9 @@ try {
     } else throw new Error("Unknown command. Use patchwork --help.");
   }
 } catch (e) {
-  if (command === "hook") {
+  if (e.name === "AbortError") {
+    console.log("Cancelled.");
+  } else if (command === "hook") {
     console.error(
       "Patchwork board check unavailable. Use patchwork status; coding can continue.",
     );

@@ -3,10 +3,10 @@ import { projectRoot, status, disconnect } from "./connect.js";
 import { connectionFile, readJSON } from "./store.js";
 import { displayText } from "./previews.js";
 
-export async function disconnectChoices({ cwd, client, env } = {}) {
-  const root = await projectRoot(cwd);
+export async function disconnectChoices({ cwd, client, env, saved } = {}) {
+  const root = saved ? saved.root : await projectRoot(cwd);
   const choices = [];
-  for (const group of await status({ cwd: root, client, env })) {
+  for (const group of await status({ cwd: root, client, env, saved })) {
     const eligible = group.chats.filter(chat => chat.enabled || chat.pendingRetirement);
     for (const chat of eligible) choices.push({
       id: chat.id,
@@ -30,7 +30,7 @@ export function selection(answer, count) {
   return [...new Set(values.map(value => Number(value) - 1))];
 }
 
-export async function disconnectPicker({ cwd, client, env, ask, log = console.log, github } = {}) {
+export async function disconnectPicker({ cwd, client, env, ask, log = console.log, github, saved } = {}) {
   let rl;
   if (!ask) {
     if (!process.stdin.isTTY || !process.stdout.isTTY)
@@ -42,12 +42,13 @@ export async function disconnectPicker({ cwd, client, env, ask, log = console.lo
     ask = question => rl.question(question + " ", { signal: abort.signal });
   }
   try {
-    const { root, choices } = await disconnectChoices({ cwd, client, env });
+    const { root, choices } = await disconnectChoices({ cwd, client, env, saved });
     if (!choices.length) {
       log("No local chats to disconnect.");
       return;
     }
     log("Disconnect chats — this project");
+    log(`Folder: ${displayText(root, 300)}`);
     log("Latest user message previews stay local. Enter cancels.\n");
     choices.forEach((chat, i) => {
       const date = Date.parse(chat.lastBoardCheck);
@@ -64,7 +65,7 @@ export async function disconnectPicker({ cwd, client, env, ask, log = console.lo
     if (!picked.length) { log("Cancelled. No chats changed."); return; }
     const selected = picked.map(i => choices[i]);
     log("\nSelected:");
-    for (const chat of selected) log(`- ${displayText(chat.name, 80)} (${displayText(chat.id)})`);
+    for (const chat of selected) log(`- ${displayText(chat.name, 80)} [${chat.client}] — ${displayText(chat.repo)} (${displayText(chat.id)})`);
     if (!/^y(?:es)?$/i.test((await ask(`Disconnect ${selected.length} chat(s)? [y/N]`)).trim())) {
       log("Cancelled. No chats changed.");
       return;
@@ -76,7 +77,7 @@ export async function disconnectPicker({ cwd, client, env, ask, log = console.lo
       const current = await readJSON(connectionFile(root, chat.client));
       if (current?.repo !== chat.repo || current.root !== root)
         throw new Error("The project connection changed. Reopen the picker before disconnecting.");
-      await disconnect({ cwd: root, client: chat.client, agent: chat.id, github, log });
+      await disconnect({ cwd: root, client: chat.client, agent: chat.id, github, log, saved });
     }
   } catch (e) {
     if (e.name === "AbortError") log("Cancelled.");

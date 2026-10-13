@@ -62,6 +62,11 @@ try {
   assert(result.stdout.includes("disconnect"));
   assert(result.stdout.includes("disconnect --select"));
   assert(result.stdout.includes("GitHub"));
+  assert(result.stdout.includes("guided menu"));
+  assert(result.stdout.includes("--json"));
+  const noninteractiveMenu = spawnSync(process.execPath, [cli, "menu"], { cwd: dir, encoding: "utf8", input: "0\n" });
+  assert.equal(noninteractiveMenu.status, 1);
+  assert.match(noninteractiveMenu.stderr, /requires a terminal/);
   const picker = spawnSync(process.execPath, [cli, "disconnect", "--select"], {
     cwd: dir,
     encoding: "utf8",
