@@ -12,6 +12,8 @@ Version 0.2.3 adds acknowledgment notes and coordination guidance. Rerun `connec
 
 Run these in your coding project's folder. Replace `TEAM/PROJECT` with your GitHub repository, such as `IcebergSnow/PatchworkBookingLab`. For Claude Code, replace `codex` with `claude`.
 
+### macOS
+
 ```sh
 # Connect (also updates an existing installation)
 npx @icebergsnow/patchwork-cli@latest connect --repo TEAM/PROJECT --client codex
@@ -25,6 +27,34 @@ npx @icebergsnow/patchwork-cli@latest disconnect --select --client codex
 # Stop Patchwork for every Codex chat in this project
 npx @icebergsnow/patchwork-cli@latest disconnect --client codex
 ```
+
+### Windows PowerShell
+
+```powershell
+# Connect (also updates an existing installation)
+npx.cmd @icebergsnow/patchwork-cli@latest connect --repo TEAM/PROJECT --client codex
+
+# Show connected chats, latest user-message previews, and last board checks
+npx.cmd @icebergsnow/patchwork-cli@latest status --client codex
+
+# Choose individual chats to disconnect
+npx.cmd @icebergsnow/patchwork-cli@latest disconnect --select --client codex
+
+# Stop Patchwork for every Codex chat in this project
+npx.cmd @icebergsnow/patchwork-cli@latest disconnect --client codex
+```
+
+PowerShell may block `npx` with the error `npx.ps1 cannot be loaded because running scripts is disabled`. Use `npx.cmd` as above, including for other `npx` examples in this README.
+
+Alternatively, you can enable normal `npx` commands for your Windows user account:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+```
+
+This optional setting changes which PowerShell scripts your user account is allowed to execute. It is not required when using `npx.cmd`.
+
+### Usage notes
 
 After connecting/updating, reload the app and review hook/MCP permissions. Connect offers to create a board if needed; teammates reuse it. `status` does not start hooks or register a chat. Its `latestUserMessage` is the first sentence (up to 160 characters), or `null` when unavailable. Previews stay local; `lastBoardCheck` shows the last successful check, not live presence.
 
