@@ -68,7 +68,7 @@ export function server(runtime) {
   );
   register(
     "post_message",
-    "Post project coordination to the connected repository's GitHub board: API proposals, dependencies, responsibilities, blockers, or progress. All agents receive posts. replyTo uses issue:NUMBER or comment:ID.",
+    "Post project coordination; all agents receive posts. Use kind=message without replyTo for general board updates and handoffs. Use kind=request with a title for a distinct unresolved dependency or decision that can be resolved independently. Reply to the same problem using replyTo=issue:NUMBER or comment:ID; avoid duplicate requests and updates.",
     z
       .object({
         chat_key: key,
