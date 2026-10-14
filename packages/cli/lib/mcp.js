@@ -68,7 +68,7 @@ export function server(runtime) {
   );
   register(
     "post_message",
-    "Post project coordination to the connected repository's GitHub board: API proposals, dependencies, responsibilities, blockers, or progress. All agents receive posts. replyTo uses issue:NUMBER or comment:ID. Use existing user authorization for this board; discussing work does not expand implementation scope.",
+    "Post project coordination to the connected repository's GitHub board: API proposals, dependencies, responsibilities, blockers, or progress. All agents receive posts. replyTo uses issue:NUMBER or comment:ID.",
     z
       .object({
         chat_key: key,

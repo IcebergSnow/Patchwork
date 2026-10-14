@@ -26,12 +26,6 @@ For the direct commands below, replace `OWNER/REPO` with your team's GitHub repo
 
 Connect prompts for GitHub sign-in if needed. The first teammate approves board creation; everyone else reuses it. **Reload the coding app and approve project, MCP, and hook permissions afterward.** Start a saved chat; local status shows its first successful board check.
 
-Connect also prints a short permission sentence to include in each chat's task:
-
-> Use Patchwork in OWNER/REPO to coordinate this project. I authorize sharing task-related technical details and posting requests, replies, acknowledgments, and verified resolutions there.
-
-Agents reuse that authorization for routine coordination. Your coding app still applies its approval rules; taking on work outside your assigned scope needs separate permission.
-
 ## Common commands
 
 <details>
