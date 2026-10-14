@@ -262,6 +262,8 @@ export async function connect({
     log(
       "Restart/open a new chat and review required MCP/hook permissions. Status will show the first successful board check.",
     );
+    log("Include board authorization in each coding chat's task:");
+    log(`Use Patchwork in ${repo} to coordinate this project. I authorize sharing task-related technical details and posting requests, replies, acknowledgments, and verified resolutions there.`);
     return { file, connection: c };
   });
 }
